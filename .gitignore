@@ -1,0 +1,58 @@
+# Python-specific ignores
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment directories
+venv/
+env/
+.venv/
+.env/
+venv.bak/
+
+# Environment and sensitive files
+.env
+*.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Streamlit-specific ignores
+config.toml
+
+# Temporary and local data directories
+temp_data/
+local_data/
+downloads/
+*.sqlite3
+
+# Log files
+*.log
+logs/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+
+# Operating System files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Machine Learning and Data Science
+*.pkl
+*.model
+*.h5
+*.hdf5
+
+# Specific to your RAG project
+*.index
+*.vector_store

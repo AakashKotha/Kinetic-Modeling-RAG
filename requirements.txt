@@ -1,0 +1,9 @@
+pypdf
+streamlit
+pymongo
+llama-index
+validators
+beautifulsoup4
+python-dotenv
+requests
+openai
