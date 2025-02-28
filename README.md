@@ -6,7 +6,7 @@ During my work in kinetic modeling as a Graduate Student Researcher at [Dr. Wang
 
 ## Project Overview
 
-A custom research assistant designed to:
+A custom RAG is designed to:
 - Upload and index research PDFs
 - Add relevant web resources
 - Perform intelligent, cross-document searches
