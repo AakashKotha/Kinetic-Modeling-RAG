@@ -46,7 +46,9 @@ SESSION_KEYS = [
     "delete_error_message", 
     "url_delete_success_message", 
     "url_delete_error_message", 
-    "upload_success_message"
+    "upload_success_message",
+    "chat_history", 
+    "user_message"  
 ]
 
 # Function to hash password
@@ -106,6 +108,7 @@ def initialize_session_state():
         st.session_state.logged_in = False
         st.session_state.is_admin = False
         st.session_state.current_page = 'login'
+        st.session_state.chat_history = [] 
         
         # Initialize other keys from previous implementation
         st.session_state.data_dir = "temp_data"
@@ -553,6 +556,57 @@ def cancel_delete():
     # Force direct rerun since this is triggered by a button click
     st.rerun()
 
+# Function to display chat interface
+def display_chat_interface(query_engine):
+    # Display chat history
+    for i, (user_msg, assistant_msg) in enumerate(st.session_state.chat_history):
+        # User message
+        with st.chat_message("user"):
+            st.write(user_msg)
+        
+        # Assistant message
+        with st.chat_message("assistant"):
+            st.write(assistant_msg)
+    
+    # Input for new message
+    user_message = st.text_input("Message:", key="user_message")
+    
+    if st.button("Send", key="send_message"):
+        process_new_message(user_message, query_engine)
+        st.rerun()
+
+# Function to process new messages
+def process_new_message(user_message, query_engine):
+    if not user_message:
+        return
+    
+    if query_engine is None:
+        assistant_response = "I'm sorry, but the knowledge base isn't available. Please try again later."
+    else:
+        try:
+            # Build context from conversation history (last 3 turns)
+            context = ""
+            for i, (u, a) in enumerate(st.session_state.chat_history[-3:]):
+                context += f"User: {u}\nAssistant: {a}\n"
+            
+            # Add current query
+            full_query = user_message
+            
+            # Only add context if we have conversation history
+            if context:
+                full_query += f"\n\nConsider this conversation context: {context}"
+            
+            # Query with context
+            response = query_engine.query(full_query)
+            assistant_response = response.response if response.response else "I couldn't find a relevant answer to your question."
+        except Exception as e:
+            assistant_response = f"I encountered an error: {str(e)}"
+            import traceback
+            st.error(traceback.format_exc())
+    
+    # Add to chat history
+    st.session_state.chat_history.append((user_message, assistant_response))    
+
 # Main Streamlit application
 def main():
 
@@ -735,29 +789,8 @@ def main():
             else:
                 st.info("No sources found. Please add PDFs or URLs to start.")
         
-        # Query input
-        query = st.text_input("Enter your query:", key="query_input")
-        
-        if st.button("Submit Query", key="submit_button"):
-            if not query:
-                st.warning("Please enter a query.")
-            elif query_engine is None:
-                st.error("Query engine is not available. Please check if your knowledge base is empty.")
-            else:
-                with st.spinner("Processing query..."):
-                    try:
-                        response = query_engine.query(query)
-                        
-                        if response.response:
-                            st.write("Response:")
-                            st.write(response.response)
-                            # Sources section removed for everyone
-                        else:
-                            st.warning("No relevant answer could be found for your query.")
-                    except Exception as e:
-                        st.error(f"Error processing query: {str(e)}")
-                        import traceback
-                        st.error(traceback.format_exc())
+        # Chat interface
+        display_chat_interface(query_engine)
         
         # Add a footer with system information
         st.markdown("---")
