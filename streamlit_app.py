@@ -649,10 +649,6 @@ def display_chat_interface(query_engine):
                 process_new_message(suggested_questions[2], query_engine)
                 st.rerun()
     
-    # Get the appropriate label
-    label = "Enter your query:" if len(st.session_state.chat_history) == 0 else "Enter your follow-up question:"
-    st.write(label)
-    
     # Use a container for better alignment control
     with st.container():
         # Create a layout with carefully adjusted widths
@@ -683,7 +679,13 @@ def display_chat_interface(query_engine):
         
         # Place the text area in the second column
         with col2:
-            user_message = st.text_area("", key="user_message", label_visibility="collapsed")
+            # Get the appropriate placeholder
+            placeholder = "Enter your query" if len(st.session_state.chat_history) == 0 else "Enter your follow-up question"
+            
+            user_message = st.text_area("", 
+                                        key="user_message", 
+                                        placeholder=placeholder,
+                                        label_visibility="collapsed")
         
         # Place the send button in the third column 
         with col3:
