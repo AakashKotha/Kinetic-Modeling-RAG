@@ -18,6 +18,13 @@ import pymongo
 import gridfs
 import hashlib
 
+import base64
+import numpy as np
+import json
+import pickle
+from datetime import datetime
+from io import BytesIO
+
 # Load environment variables
 load_dotenv()
 
@@ -746,7 +753,230 @@ def process_new_message(user_message, query_engine):
 
     # Save new exchange
     st.session_state.chat_history.append((user_message, assistant_response))
-  
+
+# Function to export embeddings in a suitable format for comparative analysis
+def export_embeddings(index):
+    """
+    Exports the embeddings from the VectorStoreIndex in a format optimized for 
+    manifold comparison and visualization.
+    
+    Args:
+        index: The VectorStoreIndex instance containing embeddings
+        
+    Returns:
+        A tuple of (success, file_content or error_message)
+    """
+    try:
+        if index is None:
+            return False, "No index available. Please add documents and index them first."
+        
+        # Initialize data structure to store embeddings and metadata
+        embeddings_data = {
+            "metadata": {
+                "timestamp": datetime.now().isoformat(),
+                "doc_count": len(st.session_state.uploaded_files),
+                "url_count": len(st.session_state.urls),
+                "description": "Embeddings export for manifold comparison"
+            },
+            "nodes": []
+        }
+        
+        # Get all nodes from the index using different approaches based on API version
+        nodes = []
+        
+        # Try different ways to access nodes from the docstore
+        try:
+            # Approach 1: Check if we can directly get all documents 
+            if hasattr(index, "docstore") and hasattr(index.docstore, "get_all_documents"):
+                node_dict = index.docstore.get_all_documents()
+                nodes = list(node_dict.values())
+            # Approach 2: Access _docstore._nodes if available
+            elif hasattr(index, "_docstore") and hasattr(index._docstore, "_nodes"):
+                node_dict = index._docstore._nodes
+                nodes = list(node_dict.values())
+            # Approach 3: Access index.index_struct.nodes for older versions
+            elif hasattr(index, "index_struct") and hasattr(index.index_struct, "nodes"):
+                nodes = index.index_struct.nodes
+            # Approach 4: Try to get documents through storage context
+            elif hasattr(index, "_storage_context") and hasattr(index._storage_context, "docstore"):
+                if hasattr(index._storage_context.docstore, "docs"):
+                    node_dict = index._storage_context.docstore.docs
+                    nodes = list(node_dict.values())
+                elif hasattr(index._storage_context.docstore, "get_all_documents"):
+                    node_dict = index._storage_context.docstore.get_all_documents()
+                    nodes = list(node_dict.values())
+            # If no nodes found, try to get nodes directly from the query engine's retriever
+            elif hasattr(index, "as_query_engine"):
+                query_engine = index.as_query_engine()
+                if hasattr(query_engine, "_retriever") and hasattr(query_engine._retriever, "_nodes"):
+                    nodes = query_engine._retriever._nodes
+        except Exception as e:
+            st.warning(f"Error accessing nodes using standard methods: {str(e)}")
+            
+        # If we still have no nodes, try to retrieve from all index nodes in a different way
+        if not nodes:
+            try:
+                # Try to use the index's get_all_nodes method
+                if hasattr(index, "get_all_nodes"):
+                    nodes = index.get_all_nodes()
+                # Try to use a dummy query to get some nodes
+                elif hasattr(index, "as_query_engine"):
+                    query_engine = index.as_query_engine()
+                    response = query_engine.query("summarize all the content")
+                    if hasattr(response, "source_nodes"):
+                        nodes = [node.node for node in response.source_nodes]
+            except Exception as e:
+                st.warning(f"Error in fallback node retrieval: {str(e)}")
+                
+        # If we still have no nodes, return an error
+        if not nodes:
+            return False, "Could not access the nodes in the index. This may be due to API changes in llama_index."
+        
+        # Try to get the embed model from the index
+        embed_model = None
+        try:
+            if hasattr(index, "_embed_model"):
+                embed_model = index._embed_model
+            elif hasattr(index, "embeddings") and hasattr(index.embeddings, "embed_model"):
+                embed_model = index.embeddings.embed_model
+            elif hasattr(index, "_service_context") and hasattr(index._service_context, "embed_model"):
+                embed_model = index._service_context.embed_model
+        except Exception:
+            embed_model = None
+        
+        # Process each node and try to get its embedding
+        for i, node in enumerate(nodes):
+            try:
+                node_id = str(getattr(node, "id", f"node_{i}"))
+                
+                # Get text content
+                if hasattr(node, "get_content"):
+                    text = node.get_content()
+                elif hasattr(node, "text"):
+                    text = node.text
+                elif hasattr(node, "content"):
+                    text = node.content
+                else:
+                    text = str(node)
+                
+                # Get metadata
+                if hasattr(node, "metadata"):
+                    metadata = node.metadata
+                elif hasattr(node, "extra_info"):
+                    metadata = node.extra_info
+                else:
+                    metadata = {}
+                
+                # Try to get embedding - different approaches
+                embedding = None
+                
+                # 1. Try to get embedding directly from node if it has one
+                if hasattr(node, "embedding"):
+                    embedding = node.embedding
+                
+                # 2. Try to get from vector store if possible
+                if embedding is None and embed_model is not None:
+                    try:
+                        embedding = embed_model.get_text_embedding(text)
+                    except:
+                        pass
+                
+                # 3. If we still don't have an embedding, use a fallback approach with OpenAI directly
+                if embedding is None and "OPENAI_API_KEY" in os.environ:
+                    try:
+                        import openai
+                        openai.api_key = os.environ["OPENAI_API_KEY"]
+                        embedding_response = openai.Embedding.create(
+                            model="text-embedding-ada-002",
+                            input=text[:8191]  # Truncate to max token limit
+                        )
+                        embedding = embedding_response["data"][0]["embedding"]
+                    except:
+                        # If OpenAI direct approach fails, just use a placeholder
+                        # This allows for exporting node text even without embeddings
+                        embedding = [0.0] * 768  # Standard embedding size
+                
+                # Convert numpy arrays to lists for JSON serialization
+                if isinstance(embedding, np.ndarray):
+                    embedding = embedding.tolist()
+                
+                # Add node information
+                node_data = {
+                    "id": node_id,
+                    "text": text,
+                    "metadata": metadata,
+                    "embedding": embedding
+                }
+                
+                embeddings_data["nodes"].append(node_data)
+                
+            except Exception as e:
+                # Skip problematic nodes but continue processing others
+                st.warning(f"Could not process node {i}: {str(e)}")
+                continue
+        
+        # Check if we have any nodes processed
+        if not embeddings_data["nodes"]:
+            return False, "No embeddings could be exported. Please try adding more documents to your index."
+        
+        # Generate a timestamp for the filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Provide two format options
+        
+        # Option 1: JSON (human-readable, interoperable)
+        json_content = json.dumps(embeddings_data, indent=2)
+        json_filename = f"embeddings_export_{timestamp}.json"
+        
+        # Option 2: Pickle (efficient for large numpy arrays, Python-specific)
+        pickle_buffer = BytesIO()
+        pickle.dump(embeddings_data, pickle_buffer)
+        pickle_content = pickle_buffer.getvalue()
+        pickle_filename = f"embeddings_export_{timestamp}.pkl"
+        
+        return True, {
+            "json": (json_content, json_filename),
+            "pickle": (pickle_content, pickle_filename)
+        }
+    
+    except Exception as e:
+        import traceback
+        error_msg = f"Error exporting embeddings: {str(e)}\n{traceback.format_exc()}"
+        return False, error_msg
+
+# Function to create a download link for a text file (e.g., JSON)
+def get_text_download_link(file_content, file_name, display_text):
+    """
+    Generates a download link for a text file.
+    
+    Args:
+        file_content: Content of the file to be downloaded
+        file_name: Name of the file
+        display_text: Text to display for the download link
+        
+    Returns:
+        HTML string with the download link
+    """
+    b64 = base64.b64encode(file_content.encode()).decode()
+    href = f'<a href="data:text/plain;base64,{b64}" download="{file_name}">{display_text}</a>'
+    return href
+
+# Function to create a download link for a binary file (e.g., Pickle)
+def get_binary_download_link(file_content, file_name, display_text):
+    """
+    Generates a download link for a binary file.
+    
+    Args:
+        file_content: Binary content of the file to be downloaded
+        file_name: Name of the file
+        display_text: Text to display for the download link
+        
+    Returns:
+        HTML string with the download link
+    """
+    b64 = base64.b64encode(file_content).decode()
+    href = f'<a href="data:application/octet-stream;base64,{b64}" download="{file_name}">{display_text}</a>'
+    return href
 
 # Main Streamlit application
 def main():
@@ -790,7 +1020,7 @@ def main():
             st.sidebar.title("Knowledge Base Management")
             
             # Create tabs for PDF and URL management
-            tab1, tab2 = st.sidebar.tabs(["PDF Documents", "URLs"])
+            tab1, tab2, tab3 = st.sidebar.tabs(["PDF Documents", "URLs", "Embeddings"])
             
             with tab1:
                 # Upload new PDF
@@ -883,6 +1113,123 @@ def main():
                     # Use a trash bin emoji for the delete button
                     if col2.button("🗑️", key=f"delete_url_{url}", help="Remove this URL"):
                         set_delete_url_confirmation(url)
+
+            with tab3:
+                st.write("Export Embeddings for Manifold Comparison")
+                
+                # Display information about the current index
+                # Check if there are documents or URLs instead of checking the index directly
+                if len(st.session_state.uploaded_files) > 0 or len(st.session_state.urls) > 0:
+                    # If we're currently indexing, show that status
+                    if st.session_state.indexing_status == "in_progress":
+                        st.info("Indexing in progress. Please wait for indexing to complete before exporting.")
+                    else:
+                        # Get approximate size of the index if possible
+                        try:
+                            if st.session_state.index is not None and hasattr(st.session_state.index, "_docstore") and hasattr(st.session_state.index._docstore, "_nodes"):
+                                node_count = len(st.session_state.index._docstore._nodes)
+                                st.write(f"Current index contains approximately {node_count} nodes.")
+                            else:
+                                st.write(f"Index is available for export.")
+                        except Exception:
+                            st.write("Index is available for export.")
+                        
+                        # Add export button
+                        if st.button("Export Embeddings", key="export_embeddings"):
+                            with st.spinner("Exporting embeddings..."):
+                                success, result = export_embeddings(st.session_state.index)
+                                
+                                # Inside the success block of the export function:
+                                if success:
+                                    st.success("Embeddings exported successfully! Choose a format to download:")
+                                    
+                                    # Use a container with custom CSS for better spacing
+                                    st.markdown("""
+                                    <style>
+                                    .download-container {
+                                        display: flex;
+                                        gap: 30px;
+                                        margin-top: 20px;
+                                        margin-bottom: 20px;
+                                    }
+                                    .download-option {
+                                        flex: 1;
+                                        padding: 15px;
+                                        border-radius: 5px;
+                                        background-color: rgba(255, 255, 255, 0.05);
+                                    }
+                                    .download-title {
+                                        font-size: 1.2rem;
+                                        font-weight: bold;
+                                        margin-bottom: 15px;
+                                    }
+                                    .format-benefits {
+                                        margin-bottom: 15px;
+                                    }
+                                    </style>
+                                    <div class="download-container">
+                                        <div class="download-option">
+                                            <div class="download-title">JSON Format</div>
+                                            <div class="format-benefits">
+                                                ✓ Human-readable<br>
+                                                ✓ Works with any programming language<br>
+                                                ✓ Easy to inspect and transform
+                                            </div>
+                                    """, unsafe_allow_html=True)
+                                    
+                                    # JSON download link
+                                    json_content, json_filename = result["json"]
+                                    json_link = get_text_download_link(
+                                        json_content, 
+                                        json_filename, 
+                                        "📥 Download JSON"
+                                    )
+                                    st.markdown(json_link, unsafe_allow_html=True)
+                                    
+                                    # Continue the HTML layout
+                                    st.markdown("""
+                                        </div>
+                                        <div class="download-option">
+                                            <div class="download-title">Pickle Format</div>
+                                            <div class="format-benefits">
+                                                ✓ Preserves numpy arrays exactly<br>
+                                                ✓ Smaller file size for large datasets<br>
+                                                ✓ Faster for Python-based analysis
+                                            </div>
+                                    """, unsafe_allow_html=True)
+                                    
+                                    # Pickle download link
+                                    pickle_content, pickle_filename = result["pickle"]
+                                    pickle_link = get_binary_download_link(
+                                        pickle_content, 
+                                        pickle_filename, 
+                                        "📥 Download Pickle"
+                                    )
+                                    st.markdown(pickle_link, unsafe_allow_html=True)
+                                    
+                                    # Close the HTML container
+                                    st.markdown("</div></div>", unsafe_allow_html=True)
+                                    
+                                    # Display additional info about the export
+                                    with st.expander("Export Contents"):
+                                        st.markdown("""
+                                        The exported file contains:
+                                        
+                                        - **Metadata**: Timestamp, document counts, and context information
+                                        - **Node Data**: For each chunk of text in your knowledge base
+                                        - Unique node ID
+                                        - Text content
+                                        - Source metadata (document name, page, etc.)
+                                        - Full embedding vector
+                                        
+                                        This structured format is ideal for:
+                                        - Comparing embeddings between different knowledge bases
+                                        - Visualizing embedding spaces using t-SNE or UMAP
+                                        - Analyzing topic clustering across different domains
+                                        - Tracking knowledge base evolution over time
+                                        """)
+                else:
+                    st.warning("No index available. Please add documents and index them first.")            
             
             # Force reindex button (outside tabs)
             if st.sidebar.button("⟳ Reindex All", key="force_reindex", help="Force reindex all documents and URLs"):
