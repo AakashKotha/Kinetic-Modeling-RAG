@@ -90,19 +90,28 @@ def login_page():
 def admin_login_form():
     st.title("Admin Login")
     
-    username = st.text_input("Username", key="admin_username")
-    password = st.text_input("Password", type="password", key="admin_password")
+    # Use a form to ensure all inputs are captured properly
+    with st.form(key="login_form"):
+        username = st.text_input("Username", key="admin_username")
+        password = st.text_input("Password", type="password", key="admin_password")
+        
+        # Submit button inside the form
+        submit_button = st.form_submit_button("Login")
+        
+        if submit_button:
+            # Add a slight delay to ensure the form values are properly captured
+            time.sleep(0.1)
+            
+            # Compare credentials
+            if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+                st.session_state.logged_in = True
+                st.session_state.is_admin = True
+                st.session_state.current_page = 'query'
+                st.rerun()
+            else:
+                st.error("Invalid username or password")
     
-    if st.button("Login", key="admin_login_submit"):
-        if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
-            st.session_state.logged_in = True
-            st.session_state.is_admin = True
-            st.session_state.current_page = 'query'
-            st.rerun()
-        else:
-            st.error("Invalid username or password")
-    
-    # Back button
+    # Back button (outside the form)
     if st.button("Back to Access Portal", key="back_to_portal"):
         st.session_state.current_page = 'login'
         st.rerun()
