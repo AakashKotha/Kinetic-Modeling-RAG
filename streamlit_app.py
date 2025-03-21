@@ -556,25 +556,54 @@ def cancel_delete():
     # Force direct rerun since this is triggered by a button click
     st.rerun()
 
-# Function to display chat interface
 def display_chat_interface(query_engine):
     # Display chat history
     for i, (user_msg, assistant_msg) in enumerate(st.session_state.chat_history):
         # User message
         with st.chat_message("user"):
             st.write(user_msg)
-        
+
         # Assistant message
         with st.chat_message("assistant"):
             st.write(assistant_msg)
-    
-    # Input for new message with context-aware label
-    if len(st.session_state.chat_history) == 0:
-        user_message = st.text_input("Enter your query:", key="user_message")
-    else:
-        user_message = st.text_input("Enter your follow-up question:", key="user_message")
-    
-    if st.button("Send", key="send_message"):
+
+    # Get the appropriate label
+    label = "Enter your query:" if len(st.session_state.chat_history) == 0 else "Enter your follow-up question:"
+
+    st.write(label)
+
+    # Use a container for better alignment control
+    with st.container():
+        # Create a layout with carefully adjusted widths
+        col1, col2, col3 = st.columns([0.07, 0.78, 0.15])
+
+        # Add CSS for vertical alignment
+        st.markdown("""
+        <style>
+        .stColumn > div {
+            display: flex;
+            align-items: center;
+            height: 100%;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+        # Place the icon in the first column
+        with col1:
+            # Use chat_message for consistent icon styling
+            with st.chat_message("user"):
+                st.write("")
+
+        # Place the input in the second column
+        with col2:
+            user_message = st.text_input("", label_visibility="collapsed", key="user_message")
+
+        # Place the send button in the third column 
+        with col3:
+            send_pressed = st.button("Send", key="send_message", use_container_width=True)
+
+    # Process message
+    if send_pressed and user_message:
         process_new_message(user_message, query_engine)
         st.rerun()
 
