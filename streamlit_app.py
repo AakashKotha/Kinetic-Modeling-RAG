@@ -1116,9 +1116,14 @@ def main():
                 # Display URL list with delete buttons
                 for url in st.session_state.urls:
                     col1, col2 = st.columns([3, 1])
-                    # Show shortened URL if too long
+                    
+                    # Show shortened URL for display
                     display_url = url if len(url) < 30 else url[:27] + "..."
-                    col1.write(display_url)
+                    
+                    # Use Streamlit's native link component instead of HTML
+                    # This approach uses Streamlit's built-in link function
+                    col1.write(f"[{display_url}]({url})")
+                    
                     # Use a trash bin emoji for the delete button
                     if col2.button("🗑️", key=f"delete_url_{url}", help="Remove this URL"):
                         set_delete_url_confirmation(url)
