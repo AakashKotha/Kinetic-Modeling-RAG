@@ -12,6 +12,8 @@ from dotenv import load_dotenv
 from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, Document, Settings
 from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.core.query_engine import RetrieverQueryEngine
+from llama_index.core.node_parser import SentenceSplitter
+from llama_index.core.postprocessor import SimilarityPostprocessor
 import pymongo
 import gridfs
 import hashlib
@@ -19,7 +21,7 @@ import hashlib
 # Load environment variables
 load_dotenv()
 
-# Predefined admin credentials
+# Predefined admin credentials from environment variables
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'admin')
 ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'default_password')
 
@@ -248,6 +250,23 @@ def add_url():
     st.session_state.should_rerun = True
     return True
 
+# Function to update index with a single document
+def update_index_with_document(index, document):
+    """Update existing index with a single new document."""
+    if index is None:
+        return None
+        
+    try:
+        # Convert document to nodes
+        nodes = Settings.node_parser.get_nodes_from_documents([document])
+        
+        # Insert nodes into existing index
+        index.insert_nodes(nodes)
+        return index
+    except Exception as e:
+        st.error(f"Error updating index: {str(e)}")
+        return index
+
 # Function to handle file upload with better MongoDB connectivity
 def handle_file_upload(uploaded_file):
     if uploaded_file is not None:
@@ -309,7 +328,19 @@ def handle_file_upload(uploaded_file):
                     
                     success = True
                     st.session_state.upload_success_message = f"Uploaded: {uploaded_file.name}"
-                    st.session_state.index_hash = ""
+                    
+                    # Try to incrementally update the index if it exists
+                    if st.session_state.index is not None:
+                        try:
+                            reader = SimpleDirectoryReader(input_files=[temp_file_path])
+                            new_doc = reader.load_data()[0]
+                            st.session_state.index = update_index_with_document(st.session_state.index, new_doc)
+                            st.session_state.last_update_time = time.time()
+                        except Exception:
+                            # Fall back to full reindex if incremental update fails
+                            st.session_state.index_hash = ""
+                    else:
+                        st.session_state.index_hash = ""
                     
                 except Exception as e:
                     retry_count += 1
@@ -340,7 +371,16 @@ def handle_file_upload(uploaded_file):
 # Function to load and index documents
 def load_and_index_documents():
     try:
-        # Optimize chunk size and overlap
+        # Create a sentence splitter for more natural chunks
+        node_parser = SentenceSplitter(
+            chunk_size=512,
+            chunk_overlap=50,
+            paragraph_separator="\n\n",
+            secondary_chunking_regex="(?<=\. )"
+        )
+        
+        # Set the node parser in settings
+        Settings.node_parser = node_parser
         Settings.chunk_size = 512
         Settings.chunk_overlap = 50
         
@@ -405,8 +445,16 @@ def load_and_index_documents():
 
 # Function to create optimized query engine
 def create_optimized_query_engine(index):
-    retriever = VectorIndexRetriever(index=index, similarity_top_k=4)
-    return RetrieverQueryEngine(retriever=retriever)
+    # Increase top_k for better coverage
+    retriever = VectorIndexRetriever(index=index, similarity_top_k=6)
+    
+    # Add a relevance filter to improve results
+    node_postprocessors = [SimilarityPostprocessor(similarity_cutoff=0.7)]
+    
+    return RetrieverQueryEngine(
+        retriever=retriever,
+        node_postprocessors=node_postprocessors
+    )
 
 # Function to set the file to be deleted with confirmation
 def set_delete_confirmation(filename):
@@ -426,37 +474,51 @@ def set_delete_url_confirmation(url):
     # Force a direct rerun since this is triggered by a button click
     st.rerun()
 
-# Function to confirm deletion of file
 def confirm_delete():
     if st.session_state.confirm_delete:
         filename = st.session_state.confirm_delete
         
         try:
-            # Remove from GridFS
+            # Remove from GridFS first
             file_doc = st.session_state.files_collection.find_one({"filename": filename})
             if file_doc and "gridfs_id" in file_doc:
-                st.session_state.fs.delete(file_doc["gridfs_id"])
-                
-            # Remove from metadata collection
+                try:
+                    grid_id = file_doc["gridfs_id"]
+                    st.session_state.fs.delete(grid_id)
+                except Exception as e:
+                    st.error(f"Error deleting from GridFS: {str(e)}")
+            
+            # Then remove from metadata collection
             st.session_state.files_collection.delete_one({"filename": filename})
             
-            # Remove from temp directory if exists
+            # Then remove from temp directory
             temp_file_path = os.path.join(st.session_state.data_dir, filename)
             if os.path.exists(temp_file_path):
                 os.remove(temp_file_path)
-                
+            
+            # Force complete reindex
             st.session_state.index_hash = ""
+            
+            # Finally remove from session state list
             if filename in st.session_state.uploaded_files:
                 st.session_state.uploaded_files.remove(filename)
             
-            # Store a success message in session state
+            # Refresh MongoDB list to be certain
+            st.session_state.uploaded_files = [
+                file_doc["filename"] for file_doc in st.session_state.files_collection.find({}, {"filename": 1, "_id": 0})
+            ]
+            
+            # Store a success message
             st.session_state.delete_success_message = f"Deleted: {filename}"
+            
         except Exception as e:
             st.session_state.delete_error_message = f"Error deleting file: {str(e)}"
+            import traceback
+            st.error(traceback.format_exc())
             
         # Clear the confirmation
         st.session_state.confirm_delete = None
-        # Force direct rerun since this is triggered by a button click
+        # Force direct rerun
         st.rerun()
 
 # Function to confirm deletion of URL
@@ -650,10 +712,11 @@ def main():
                 with st.spinner("Reindexing knowledge base..."):
                     pass
         
-        # Display source counts
+        # Display source counts - only for admin
         pdf_count = len(st.session_state.uploaded_files)
         url_count = len(st.session_state.urls)
-        st.write(f"Knowledge base: {pdf_count} PDFs and {url_count} URLs")
+        if st.session_state.is_admin:
+            st.write(f"Knowledge base: {pdf_count} PDFs and {url_count} URLs")
         
         # Load and index documents if needed
         if need_reindex or st.session_state.index is None:
@@ -688,15 +751,26 @@ def main():
                         if response.response:
                             st.write("Response:")
                             st.write(response.response)
+                            # Sources section removed for everyone
                         else:
                             st.warning("No relevant answer could be found for your query.")
                     except Exception as e:
                         st.error(f"Error processing query: {str(e)}")
+                        import traceback
+                        st.error(traceback.format_exc())
         
-        # Reset indexing status after UI rendering is complete
-        if st.session_state.indexing_status == "complete":
-            st.session_state.indexing_status = "idle"
+        # Add a footer with system information
+        st.markdown("---")
+        st.markdown(f"Last index update: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.session_state.last_update_time))}")
+        if st.session_state.is_admin:
+            mongo_status = "Connected" if hasattr(st.session_state, "files_collection") else "Disconnected"
+            st.markdown(f"MongoDB Status: {mongo_status} | Index Status: {st.session_state.indexing_status}")    
 
 # Run the application
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        st.error(f"An unexpected error occurred: {str(e)}")
+        st.error(traceback.format_exc())            
