@@ -568,44 +568,67 @@ def display_chat_interface(query_engine):
         with st.chat_message("assistant"):
             st.write(assistant_msg)
     
-    # Input for new message
-    user_message = st.text_input("Message:", key="user_message")
+    # Input for new message with context-aware label
+    if len(st.session_state.chat_history) == 0:
+        user_message = st.text_input("Enter your query:", key="user_message")
+    else:
+        user_message = st.text_input("Enter your follow-up question:", key="user_message")
     
     if st.button("Send", key="send_message"):
         process_new_message(user_message, query_engine)
         st.rerun()
 
-# Function to process new messages
 def process_new_message(user_message, query_engine):
     if not user_message:
         return
-    
+
     if query_engine is None:
         assistant_response = "I'm sorry, but the knowledge base isn't available. Please try again later."
     else:
         try:
-            # Build context from conversation history (last 3 turns)
+            # Build conversation context with recency bias
             context = ""
-            for i, (u, a) in enumerate(st.session_state.chat_history[-3:]):
-                context += f"User: {u}\nAssistant: {a}\n"
-            
-            # Add current query
-            full_query = user_message
-            
-            # Only add context if we have conversation history
-            if context:
-                full_query += f"\n\nConsider this conversation context: {context}"
-            
-            # Query with context
+            if st.session_state.chat_history:
+                context += "Here is the full conversation history so far:\n\n"
+                for i, (u, a) in enumerate(st.session_state.chat_history):
+                    if i == len(st.session_state.chat_history) - 1:
+                        context += f"[Most recent exchange]\nUser: {u}\nAssistant: {a}\n\n"
+                    else:
+                        context += f"User: {u}\nAssistant: {a}\n\n"
+
+            # Refined and clear prompt
+            full_query = f"""
+            You are an intelligent AI assistant helping a user in an ongoing conversation.
+
+            USER'S CURRENT MESSAGE:
+            \"{user_message}\"
+
+            CONTEXT:
+            {context}
+
+            INSTRUCTIONS:
+            - Give more proiority to the "Most recent exchange", if the query is a follow-up. 
+            - If the user's message is a follow-up, continue the topic accordingly using the most recent exchange.
+            - If it's a new or unrelated question, find relevant context in the conversation history.
+            - If clarification is needed, ask a concise follow-up question.
+            - Prioritize clarity, relevance, and helpfulness.
+            - Keep your tone friendly and informative.
+
+            Respond to the user's message with a thoughtful, concise, and helpful reply.
+            """
+
+            # Query the engine
             response = query_engine.query(full_query)
             assistant_response = response.response if response.response else "I couldn't find a relevant answer to your question."
+
         except Exception as e:
             assistant_response = f"I encountered an error: {str(e)}"
             import traceback
             st.error(traceback.format_exc())
-    
-    # Add to chat history
-    st.session_state.chat_history.append((user_message, assistant_response))    
+
+    # Save new exchange
+    st.session_state.chat_history.append((user_message, assistant_response))
+  
 
 # Main Streamlit application
 def main():
