@@ -562,22 +562,20 @@ def display_chat_interface(query_engine):
         # User message
         with st.chat_message("user"):
             st.write(user_msg)
-
         # Assistant message
         with st.chat_message("assistant"):
             st.write(assistant_msg)
-
+    
     # Get the appropriate label
     label = "Enter your query:" if len(st.session_state.chat_history) == 0 else "Enter your follow-up question:"
-
     st.write(label)
-
+    
     # Use a container for better alignment control
     with st.container():
         # Create a layout with carefully adjusted widths
         col1, col2, col3 = st.columns([0.07, 0.78, 0.15])
-
-        # Add CSS for vertical alignment
+        
+        # Add CSS for vertical alignment and text area height
         st.markdown("""
         <style>
         .stColumn > div {
@@ -585,23 +583,29 @@ def display_chat_interface(query_engine):
             align-items: center;
             height: 100%;
         }
+        /* Custom styling for the text area to make it 3 lines tall with scrolling */
+        textarea {
+            min-height: 80px !important;  /* Approximately 3 lines */
+            max-height: 80px !important;
+            overflow-y: auto !important;
+        }
         </style>
         """, unsafe_allow_html=True)
-
+        
         # Place the icon in the first column
         with col1:
             # Use chat_message for consistent icon styling
             with st.chat_message("user"):
                 st.write("")
-
-        # Place the input in the second column
+        
+        # Place the text area in the second column
         with col2:
-            user_message = st.text_input("", label_visibility="collapsed", key="user_message")
-
+            user_message = st.text_area("", key="user_message", label_visibility="collapsed")
+        
         # Place the send button in the third column 
         with col3:
             send_pressed = st.button("Send", key="send_message", use_container_width=True)
-
+    
     # Process message
     if send_pressed and user_message:
         process_new_message(user_message, query_engine)
