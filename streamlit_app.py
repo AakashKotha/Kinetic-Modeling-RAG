@@ -556,6 +556,56 @@ def cancel_delete():
     # Force direct rerun since this is triggered by a button click
     st.rerun()
 
+def generate_suggested_questions(query_engine, force_refresh=False):
+    """Generate suggested questions based on the current content in the knowledge base."""
+    try:
+        # System prompt to generate questions based on current knowledge base content
+        system_prompt = """
+        Based on the current content in the knowledge base, generate 3 diverse and interesting starter questions 
+        that users might want to ask. The questions should:
+        
+        1. Be directly answerable from the CURRENT knowledge base content
+        2. Cover different topics or aspects of the available documents
+        3. Be concise (10 words or less) but specific enough to be meaningful
+        4. Reflect the most recent and relevant information in the documents
+        5. Be in the form of questions (end with ?)
+        
+        IMPORTANT: Only generate questions based on the CURRENT documents available.
+        
+        Format the response as a numbered list with just the questions, no additional text.
+        """
+
+        # Use the query engine to generate suggestions
+        response = query_engine.query(system_prompt)
+        
+        # Parse the response to extract the questions
+        suggested_questions = []
+        for line in response.response.strip().split('\n'):
+            # Look for numbered lines (1., 2., 3., etc.)
+            if line.strip() and (line.strip()[0].isdigit() and line.strip()[1:3] in ['. ', '? ', ') ']):
+                # Extract just the question, removing the number and any trailing punctuation
+                question = line.strip()[3:].strip()
+                if question:
+                    suggested_questions.append(question)
+        
+        # If we didn't get exactly 3 questions, provide fallbacks based on current content
+        if len(suggested_questions) != 3:
+            suggested_questions = [
+                "What documents are currently in the knowledge base?",
+                "What topics are covered in the available sources?",
+                "Can you summarize the main content of current documents?"
+            ]
+        
+        return suggested_questions
+    
+    except Exception:
+        # If there's any error, use generic suggestions that prompt exploration
+        return [
+            "What documents are currently available?",
+            "What kind of information can I find here?",
+            "Can you help me understand the current knowledge base?"
+        ]
+
 def display_chat_interface(query_engine):
     # Display chat history
     for i, (user_msg, assistant_msg) in enumerate(st.session_state.chat_history):
@@ -565,6 +615,39 @@ def display_chat_interface(query_engine):
         # Assistant message
         with st.chat_message("assistant"):
             st.write(assistant_msg)
+    
+    # Show suggested questions only if this is the first interaction (empty chat history)
+    if len(st.session_state.chat_history) == 0 and query_engine is not None:
+        st.write("Suggested questions:")
+        
+        # Generate suggested questions based on knowledge base
+        try:
+            suggested_questions = generate_suggested_questions(query_engine)
+        except Exception:
+            # Fallback if generation fails
+            suggested_questions = [
+                "What documents are currently available?",
+                "What topics can I explore?",
+                "Can you help me understand the knowledge base?"
+            ]
+        
+        # Display clickable buttons for each suggested question
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button(suggested_questions[0], key="suggested_q1"):
+                process_new_message(suggested_questions[0], query_engine)
+                st.rerun()
+                
+        with col2:
+            if st.button(suggested_questions[1], key="suggested_q2"):
+                process_new_message(suggested_questions[1], query_engine)
+                st.rerun()
+                
+        with col3:
+            if st.button(suggested_questions[2], key="suggested_q3"):
+                process_new_message(suggested_questions[2], query_engine)
+                st.rerun()
     
     # Get the appropriate label
     label = "Enter your query:" if len(st.session_state.chat_history) == 0 else "Enter your follow-up question:"
@@ -834,7 +917,7 @@ def main():
                 with st.spinner("Reindexing knowledge base..."):
                     st.session_state.index = load_and_index_documents()
                     st.session_state.last_update_time = time.time()
-        
+                        
         # Create query engine if index exists
         if st.session_state.index is not None:
             query_engine = create_optimized_query_engine(st.session_state.index)
