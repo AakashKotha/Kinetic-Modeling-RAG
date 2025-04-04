@@ -17,6 +17,8 @@ venv.bak/
 .env.development.local
 .env.test.local
 .env.production.local
+credentials.json
+token.json
 
 # Streamlit-specific ignores
 config.toml
