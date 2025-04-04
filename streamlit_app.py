@@ -25,6 +25,20 @@ import pickle
 from datetime import datetime
 from io import BytesIO
 
+
+# Add these imports to your existing imports
+import io
+import re
+import zipfile
+import fitz  # PyMuPDF
+from googleapiclient.discovery import build
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.http import MediaIoBaseDownload
+from google.oauth2.credentials import Credentials
+import pikepdf
+import openai
+
 # Load environment variables
 load_dotenv()
 
@@ -55,8 +69,13 @@ SESSION_KEYS = [
     "url_delete_error_message", 
     "upload_success_message",
     "chat_history", 
-    "user_message"  
+    "user_message",    
+    "confirm_delete_all"   
 ]
+
+# Add these constants to your existing constants
+GOOGLE_DRIVE_FOLDER_ID = "1Bd4NU6TY_R4MdRHwEXQO8YVmd28EYkfH"  # Your Google Drive folder ID
+SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 
 # Function to hash password
 def hash_password(password):
@@ -149,14 +168,18 @@ def initialize_session_state():
         try:
             mongo_client = pymongo.MongoClient(
                 MONGO_URI, 
-                serverSelectionTimeoutMS=15000,
-                connectTimeoutMS=15000,
-                socketTimeoutMS=15000,
+                serverSelectionTimeoutMS=30000,  # Increased from 15000
+                connectTimeoutMS=30000,          # Increased from 15000
+                socketTimeoutMS=60000,           # Increased from 15000
                 retryWrites=True,
-                tlsAllowInvalidCertificates=True  # For Atlas compatibility
+                tlsAllowInvalidCertificates=True,
+                maxPoolSize=100,                 # Increased pool size
+                minPoolSize=10,                  # Minimum pool size
+                waitQueueTimeoutMS=30000         # Wait queue timeout
             )
             
-            mongo_client.admin.command('ping')
+            # Add more robust connection check
+            mongo_client.admin.command('ping', serverSelectionTimeoutMS=10000)
             
             db = mongo_client["rag_system"]
             st.session_state.urls_collection = db["urls"]
@@ -171,8 +194,14 @@ def initialize_session_state():
                 url_doc["url"] for url_doc in st.session_state.urls_collection.find({}, {"url": 1, "_id": 0})
             ]
             
+        except pymongo.errors.ConnectionFailure as e:
+            st.error(f"Failed to connect to MongoDB: {str(e)}")
+            st.error("Please check your MongoDB connection settings and network.")
+            return False
         except Exception as e:
-            st.error(f"Error connecting to MongoDB: {str(e)}")
+            st.error(f"Unexpected error connecting to MongoDB: {str(e)}")
+            import traceback
+            st.error(traceback.format_exc())
             return False
         
         # Initialize other session state variables
@@ -313,13 +342,15 @@ def handle_file_upload(uploaded_file):
                 try:
                     # Create a fresh connection for each retry attempt
                     mongo_client = pymongo.MongoClient(
-                        os.getenv("MONGO_URI"), 
-                        serverSelectionTimeoutMS=10000,  # Increase timeout to 10 seconds
-                        connectTimeoutMS=10000,
-                        socketTimeoutMS=30000,  # Increase socket timeout for large files
-                        maxPoolSize=1,  # Limit pool size for uploads
-                        retryWrites=True  # Enable retry writes
-                    )
+                                    os.getenv("MONGO_URI"), 
+                                    serverSelectionTimeoutMS=30000,
+                                    connectTimeoutMS=30000,
+                                    socketTimeoutMS=60000,
+                                    maxPoolSize=100,
+                                    minPoolSize=10,
+                                    waitQueueTimeoutMS=30000,
+                                    retryWrites=True
+                                )
                     
                     db = mongo_client["rag_system"]
                     fs = gridfs.GridFS(db)
@@ -987,9 +1018,769 @@ def get_binary_download_link(file_content, file_name, display_text):
     href = f'<a href="data:application/octet-stream;base64,{b64}" download="{file_name}">{display_text}</a>'
     return href
 
+# Add this function to your code
+def delete_all_files():
+    """
+    Delete all PDF files from MongoDB GridFS, the files collection, and the local temp directory.
+    Returns success status and message.
+    """
+    try:
+        # Get all files from the collection
+        all_files = list(st.session_state.files_collection.find({}, {"filename": 1, "gridfs_id": 1, "_id": 0}))
+        
+        # Count the total files
+        total_files = len(all_files)
+        
+        if total_files == 0:
+            return True, "No files to delete."
+        
+        # First delete all files from GridFS
+        deleted_count = 0
+        for file_doc in all_files:
+            try:
+                if "gridfs_id" in file_doc:
+                    # Delete from GridFS
+                    st.session_state.fs.delete(file_doc["gridfs_id"])
+                
+                # Delete from local temp directory
+                if "filename" in file_doc:
+                    temp_file_path = os.path.join(st.session_state.data_dir, file_doc["filename"])
+                    if os.path.exists(temp_file_path):
+                        os.remove(temp_file_path)
+                
+                deleted_count += 1
+            except Exception as e:
+                print(f"Error deleting file {file_doc.get('filename', 'unknown')}: {str(e)}")
+                # Continue with next file even if one fails
+                continue
+        
+        # Then delete all entries from the files collection
+        st.session_state.files_collection.delete_many({})
+        
+        # Clear the uploaded_files list in session state
+        st.session_state.uploaded_files = []
+        
+        # Force reindex
+        st.session_state.index_hash = ""
+        
+        return True, f"Successfully deleted {deleted_count} out of {total_files} files."
+    
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"Error deleting all files: {str(e)}\n{error_details}")
+        return False, f"Error deleting files: {str(e)}"
+
+# Add this to your main function in the PDF Documents tab section
+# Place it after the "Available PDFs:" heading and before displaying the PDF list
+
+# Add a "Delete All Files" button with confirmation dialog
+def add_delete_all_button_to_tab1():
+    # Add a delete all button with a red style
+    st.markdown(
+        """
+        <style>
+        .delete-all-btn {
+            background-color: #FF5252;
+            color: white;
+        }
+        </style>
+        """, 
+        unsafe_allow_html=True
+    )
+    
+    # Use a container to place the button on the right
+    with st.container():
+        col1, col2 = st.columns([3, 1])
+        with col2:
+            if st.button("Delete All Files", key="delete_all_btn", type="primary", 
+                        help="Delete all PDF files from the knowledge base"):
+                # Set confirmation state
+                st.session_state.confirm_delete_all = True
+                st.rerun()
+    
+    # Show confirmation dialog if needed
+    if hasattr(st.session_state, 'confirm_delete_all') and st.session_state.confirm_delete_all:
+        st.warning("⚠️ Are you sure you want to delete ALL files? This action cannot be undone.")
+        col1, col2 = st.columns(2)
+        if col1.button("Yes, Delete All", key="confirm_delete_all_yes", type="primary"):
+            # Perform the deletion
+            success, message = delete_all_files()
+            if success:
+                st.session_state.delete_success_message = message
+            else:
+                st.session_state.delete_error_message = message
+            
+            # Clear confirmation state
+            st.session_state.confirm_delete_all = False
+            st.rerun()
+            
+        if col2.button("Cancel", key="confirm_delete_all_no"):
+            # Clear confirmation state
+            st.session_state.confirm_delete_all = False
+            st.rerun()
+
+# Function to authenticate with Google Drive
+def authenticate_google_drive():
+    """Authenticate with Google Drive API."""
+    creds = None
+    # The file token.json stores the user's access and refresh tokens
+    if os.path.exists('token.json'):
+        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    
+    # If credentials don't exist or are invalid, authenticate
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                'credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        # Save the credentials for the next run
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
+    
+    return creds
+
+# Function to list PDF files in the specified Google Drive folder
+def list_pdf_files_in_drive(service, folder_id):
+    """List all PDF files in the specified Google Drive folder."""
+    results = []
+    page_token = None
+    
+    while True:
+        response = service.files().list(
+            q=f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false",
+            spaces='drive',
+            fields='nextPageToken, files(id, name, size, modifiedTime)',
+            pageToken=page_token
+        ).execute()
+        
+        results.extend(response.get('files', []))
+        page_token = response.get('nextPageToken')
+        
+        if not page_token:
+            break
+    
+    return results
+
+def extract_text_for_analysis(pdf_content, max_pages=10):
+    """
+    Extract text from PDF with improved robustness and logging.
+    
+    Args:
+        pdf_content (bytes): PDF file content
+        max_pages (int): Maximum number of pages to extract
+    
+    Returns:
+        str: Extracted text
+    """
+    extracted_text = ""
+    try:
+        with io.BytesIO(pdf_content) as pdf_buffer:
+            doc = fitz.open(stream=pdf_buffer, filetype="pdf")
+            
+            # Try multiple approaches to extract text
+            for page_num in range(min(max_pages, doc.page_count)):
+                try:
+                    page = doc[page_num]
+                    
+                    # Extract text with multiple methods
+                    page_text = page.get_text("text")  # Standard text extraction
+                    
+                    # If standard extraction fails, try alternative methods
+                    if not page_text.strip():
+                        # Try extracting blocks
+                        blocks = page.get_text("blocks")
+                        page_text = " ".join([block[4] for block in blocks if block[4].strip()])
+                    
+                    # Add page number for context
+                    extracted_text += f"--- Page {page_num + 1} ---\n{page_text}\n\n"
+                
+                except Exception as page_error:
+                    print(f"Error extracting text from page {page_num}: {page_error}")
+            
+            # Limit total text length
+            if len(extracted_text) > 15000:
+                extracted_text = extracted_text[:15000] + "... [TEXT TRUNCATED]"
+            
+            # Debug logging
+            print("Extracted PDF Text Length:", len(extracted_text))
+            print("First 500 characters:\n", extracted_text[:500])
+            
+            return extracted_text
+    
+    except Exception as e:
+        print(f"Critical error in text extraction: {e}")
+        import traceback
+        traceback.print_exc()
+        return ""
+
+def parse_original_filename(filename):
+    """
+    Parse the original filename to extract potential metadata.
+    
+    Args:
+        filename (str): Original filename of the PDF
+    
+    Returns:
+        dict: Parsed filename metadata
+    """
+    # Remove file extension
+    basename = os.path.splitext(filename)[0]
+    
+    # Default values
+    parsed = {
+        "year": "Unknown",
+        "author": "Unknown",
+        "title": clean_title(basename),
+        "category": "Advanced"  # Default category
+    }
+    
+    # Try to extract year (looking for 4 digits that could be a year)
+    year_match = re.search(r'(19|20)\d{2}', basename)
+    if year_match:
+        parsed["year"] = year_match.group(0)
+    
+    # Try to extract author - multiple patterns
+    author_patterns = [
+        r'([A-Z][a-z]+),\s*[A-Z]',  # LastName, FirstInitial
+        r'([A-Z][a-z]+)\s+et\s+al',  # LastName et al
+        r'([A-Z][a-z]+)\s+[A-Z]\.',  # LastName F.
+    ]
+    
+    for pattern in author_patterns:
+        author_match = re.search(pattern, basename)
+        if author_match:
+            parsed["author"] = author_match.group(1)
+            break
+    
+    return parsed
+
+def clean_title(title):
+    """
+    Clean and format a title string for filename.
+    
+    Args:
+        title (str): Original title
+    
+    Returns:
+        str: Cleaned and formatted title
+    """
+    # Remove special characters
+    title = re.sub(r'[<>:"/\\|?*]', '', title)
+    
+    # Replace spaces and underscores with hyphens
+    title = re.sub(r'[\s_]+', '-', title)
+    
+    # Remove small/common words
+    words = title.split('-')
+    significant_words = [
+        w for w in words 
+        if len(w) > 2 and 
+        w.lower() not in ["the", "and", "for", "with", "this", "that", "from", "using"]
+    ]
+    
+    # Take up to 6 significant words
+    title = '-'.join(significant_words[:6])
+    
+    return title
+
+def clean_filename(filename):
+    """
+    Clean up filename to ensure it meets requirements.
+    
+    Args:
+        filename (str): Original filename
+    
+    Returns:
+        str: Cleaned filename
+    """
+    # Remove invalid characters
+    filename = re.sub(r'[<>:"/\\|?*]', '', filename)
+    
+    # Replace spaces with hyphens
+    filename = re.sub(r'\s+', '-', filename)
+    
+    # Remove consecutive hyphens
+    filename = re.sub(r'-+', '-', filename)
+    
+    # Ensure filename isn't too long
+    if len(filename) > 255:
+        parts = filename[:-4].split('_')
+        if len(parts) >= 4:
+            # Shorten the title part
+            max_title_length = 100 - len(f"{parts[0]}_{parts[1]}_{parts[3]}.pdf") - 3
+            parts[2] = parts[2][:max_title_length]
+            filename = '_'.join(parts) + '.pdf'
+    
+    return filename
+
+def create_standardized_filename(parsed_info):
+    """
+    Create a basic standardized filename from parsed information.
+    
+    Args:
+        parsed_info (dict): Parsed filename metadata
+    
+    Returns:
+        str: Standardized filename
+    """
+    return f"{parsed_info['year']}_{parsed_info['author']}_{parsed_info['title']}_{parsed_info.get('category', 'Advanced')}.pdf"
+
+def get_standardized_filename_with_chatgpt(original_filename, pdf_content):
+    """
+    Use ChatGPT to generate a standardized, meaningful filename for academic papers.
+    
+    Args:
+        original_filename (str): Original filename of the PDF
+        pdf_content (bytes): Content of the PDF file
+    
+    Returns:
+        str: Standardized filename
+    """
+    # Parse original filename for fallback information
+    parsed_info = parse_original_filename(original_filename)
+    
+    try:
+        # Extract text from the PDF for analysis
+        text = extract_text_for_analysis(pdf_content, max_pages=10)
+        
+        # If no text extracted, use a different strategy
+        if not text.strip():
+            print(f"WARNING: No text extracted from {original_filename}")
+            return create_standardized_filename(parsed_info)
+        
+        # Create OpenAI client
+        client = openai.OpenAI()
+        
+        # Attempt to use GPT-4 if available (more accurate)
+        try:
+            completion = client.chat.completions.create(
+                model="gpt-4-1106-preview",  # Use GPT-4 Turbo
+                messages=[
+                    {
+                        "role": "system", 
+                        "content": """
+                        You are an expert academic document classifier for scientific papers.
+                        Extract precise metadata from the document:
+                        
+                        1. Year: Most recent/prominent publication year (4 digits)
+                        2. Author: FIRST AUTHOR'S LAST NAME ONLY
+                           - If multiple authors, use the first author's last name
+                           - No initials or full names
+                        3. Title: 5-6 MOST TECHNICAL words from the paper title
+                           - Remove common words (the, a, an, etc.)
+                           - Use technical, specific terminology
+                           - Hyphen-separate words
+                        4. Category: Most appropriate from:
+                           Brain, Lung, Liver, Heart, Kidney, Advanced, Other
+                        
+                        Respond EXACTLY in this JSON format:
+                        {
+                          "year": "YYYY",
+                          "author": "LastName",
+                          "title": "Technical-Words-From-Title",
+                          "category": "Category"
+                        }
+                        """
+                    },
+                    {
+                        "role": "user", 
+                        "content": f"""
+                        Original Filename: {original_filename}
+                        
+                        Document Text:
+                        {text[:15000]}  # Limit to avoid token overflow
+                        
+                        Please carefully analyze the document and extract the metadata.
+                        """
+                    }
+                ],
+                temperature=0.3,
+                max_tokens=250,
+                response_format={"type": "json_object"}
+            )
+            
+            # Parse the response
+            response_text = completion.choices[0].message.content.strip()
+            metadata = json.loads(response_text)
+            
+            # Validate and clean the metadata
+            year = metadata.get('year', parsed_info['year'])
+            author = metadata.get('author', parsed_info['author'])
+            title = metadata.get('title', parsed_info['title'])
+            category = metadata.get('category', 'Advanced')
+            
+            # Create and clean the filename
+            filename = f"{year}_{author}_{title}_{category}.pdf"
+            return clean_filename(filename)
+        
+        except Exception as gpt4_error:
+            print(f"GPT-4 error: {gpt4_error}")
+            # Fallback to GPT-3.5 if GPT-4 fails
+            completion = client.chat.completions.create(
+                model="gpt-3.5-turbo-1106",
+                messages=[
+                    {
+                        "role": "system", 
+                        "content": """
+                        Extract document metadata precisely:
+                        1. Year: 4-digit publication year
+                        2. Author: First author's LAST NAME only
+                        3. Title: 5-6 technical words (hyphen-separated)
+                        4. Category: Brain, Lung, Liver, Heart, Kidney, Advanced, Other
+                        
+                        JSON format required:
+                        {
+                          "year": "YYYY",
+                          "author": "LastName",
+                          "title": "Technical-Words-From-Title",
+                          "category": "Category"
+                        }
+                        """
+                    },
+                    {
+                        "role": "user", 
+                        "content": f"""
+                        Original Filename: {original_filename}
+                        
+                        Document Text:
+                        {text[:15000]}
+                        
+                        Extract metadata carefully.
+                        """
+                    }
+                ],
+                temperature=0.4,
+                max_tokens=250,
+                response_format={"type": "json_object"}
+            )
+            
+            # Parse the response
+            response_text = completion.choices[0].message.content.strip()
+            metadata = json.loads(response_text)
+            
+            # Validate and clean the metadata
+            year = metadata.get('year', parsed_info['year'])
+            author = metadata.get('author', parsed_info['author'])
+            title = metadata.get('title', parsed_info['title'])
+            category = metadata.get('category', 'Advanced')
+            
+            # Create and clean the filename
+            filename = f"{year}_{author}_{title}_{category}.pdf"
+            return clean_filename(filename)
+    
+    except Exception as e:
+        print(f"Error generating standardized filename: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # Final fallback to create a basic standardized name
+        return create_standardized_filename(parsed_info)
+
+def compress_pdf(pdf_content):
+    """
+    Compress PDF content using pikepdf with maximum compression settings.
+    
+    Args:
+        pdf_content (bytes): Original PDF file content
+    
+    Returns:
+        bytes: Compressed PDF content
+    """
+    try:
+        # Create a temporary directory for processing
+        temp_dir = "pdf_compression_temp"
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        # Generate unique temporary filenames
+        import uuid
+        input_filename = os.path.join(temp_dir, f"input_{uuid.uuid4()}.pdf")
+        output_filename = os.path.join(temp_dir, f"compressed_{uuid.uuid4()}.pdf")
+        
+        # Write input PDF to temporary file
+        with open(input_filename, "wb") as f:
+            f.write(pdf_content)
+        
+        # Open the PDF
+        pdf = pikepdf.open(input_filename)
+        
+        # Aggressive compression settings
+        pdf.save(
+            output_filename, 
+            compress_streams=True,          # Compress stream objects
+            compress_images=True,           # Compress images aggressively
+            object_stream_mode=pikepdf.ObjectStreamMode.generate,  # Optimize object streams
+            linearize=True,                 # Create linearized (web-optimized) PDF
+            remove_unreferenced_resources=True,  # Remove unused resources
+            
+            # Advanced compression parameters
+            stream_data_mode=pikepdf.StreamDataMode.compress,  # Maximize stream compression
+            optimize_mode=pikepdf.OptimizeMode.full,  # Full optimization
+        )
+        
+        # Read compressed content
+        with open(output_filename, "rb") as f:
+            compressed_content = f.read()
+        
+        # Calculate compression ratio
+        original_size = len(pdf_content)
+        compressed_size = len(compressed_content)
+        compression_ratio = (original_size - compressed_size) / original_size * 100
+        
+        # Clean up temporary files
+        try:
+            os.remove(input_filename)
+            os.remove(output_filename)
+            os.rmdir(temp_dir)
+        except Exception as cleanup_error:
+            print(f"Warning: Could not remove temporary files: {cleanup_error}")
+        
+        # Only return compressed version if it's smaller
+        if compressed_size < original_size:
+            print(f"PDF Compression: {compression_ratio:.2f}% reduction")
+            return compressed_content
+        
+        # If no significant compression, return original content
+        print("PDF compression did not reduce file size")
+        return pdf_content
+    
+    except Exception as e:
+        print(f"Error during PDF compression: {str(e)}")
+        import traceback
+        print(traceback.format_exc())
+        
+        # Return original content if compression fails
+        return pdf_content
+
+# Function to download and process a PDF file from Google Drive
+def download_and_process_pdf(service, file_id, original_filename):
+    """
+    Download a PDF file from Google Drive, use ChatGPT to standardize the filename,
+    compress it, and return it.
+    """
+    try:
+        # Create a BytesIO object to store the downloaded file
+        file_buffer = io.BytesIO()
+        
+        # Create a MediaIoBaseDownload object for the file
+        request = service.files().get_media(fileId=file_id)
+        downloader = MediaIoBaseDownload(file_buffer, request)
+        
+        # Download the file
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+        
+        # Get the file content
+        file_content = file_buffer.getvalue()
+        
+        # Use ChatGPT to get a standardized filename
+        standardized_filename = get_standardized_filename_with_chatgpt(
+            original_filename, 
+            file_content
+        )
+        
+        # Compress the PDF
+        compressed_content = compress_pdf(file_content)
+        
+        # Calculate compression ratio
+        original_size = len(file_content)
+        compressed_size = len(compressed_content)
+        compression_ratio = (original_size - compressed_size) / original_size * 100
+        
+        return {
+            'original_filename': original_filename,
+            'standardized_filename': standardized_filename,
+            'content': compressed_content,
+            'original_size': original_size,
+            'compressed_size': compressed_size,
+            'compression_ratio': compression_ratio
+        }
+    except Exception as e:
+        print(f"Error downloading/processing file {original_filename}: {str(e)}")
+        return None
+
+# Function to import PDFs from Google Drive and save to MongoDB
+def import_pdfs_from_google_drive():
+    """
+    Main function to import PDFs from Google Drive, process them using ChatGPT,
+    and save to MongoDB. Includes rate limiting for ChatGPT API calls.
+    """
+    results = {
+        'success': False,
+        'total_files': 0,
+        'processed_files': 0,
+        'error_files': 0,
+        'total_size_original': 0,
+        'total_size_compressed': 0,
+        'files': []
+    }
+    
+    mongo_client = None
+    try:
+        # Authenticate with Google Drive
+        creds = authenticate_google_drive()
+        service = build('drive', 'v3', credentials=creds)
+        
+        # List PDF files in the specified folder
+        pdf_files = list_pdf_files_in_drive(service, GOOGLE_DRIVE_FOLDER_ID)
+        results['total_files'] = len(pdf_files)
+        
+        if not pdf_files:
+            results['message'] = "No PDF files found in the specified Google Drive folder."
+            return results
+        
+        # Set OpenAI API key from environment variable
+        openai.api_key = os.getenv("OPENAI_API_KEY")
+        
+        # Create MongoDB client with robust connection settings
+        mongo_client = pymongo.MongoClient(
+            os.getenv("MONGO_URI"), 
+            serverSelectionTimeoutMS=30000,
+            connectTimeoutMS=30000,
+            socketTimeoutMS=60000,
+            maxPoolSize=100,
+            minPoolSize=10,
+            waitQueueTimeoutMS=30000,
+            retryWrites=True,
+            tlsAllowInvalidCertificates=True
+        )
+        
+        # Verify MongoDB connection
+        mongo_client.admin.command('ping', serverSelectionTimeoutMS=10000)
+        
+        # Get database and collections
+        db = mongo_client["rag_system"]
+        files_collection = db["files"]
+        fs = gridfs.GridFS(db)
+        
+        # Add a progress bar
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # Process each PDF file with rate limiting
+        for i, pdf_file in enumerate(pdf_files):
+            file_id = pdf_file['id']
+            original_filename = pdf_file['name']
+            
+            # Update progress
+            progress_bar.progress((i + 1) / len(pdf_files))
+            status_text.text(f"Processing file {i+1} of {len(pdf_files)}: {original_filename}")
+            
+            # Check if this file already exists in the database
+            if files_collection.find_one({"original_filename": original_filename}):
+                # Skip this file and count it as processed
+                results['processed_files'] += 1
+                results['files'].append({
+                    'original_filename': original_filename,
+                    'status': 'skipped',
+                    'message': 'File already exists in the database'
+                })
+                continue
+            
+            # Download and process the PDF with ChatGPT
+            processed_file = download_and_process_pdf(service, file_id, original_filename)
+            
+            if processed_file:
+                try:
+                    # Save to GridFS
+                    gridfs_file_id = fs.put(
+                        processed_file['content'],
+                        filename=processed_file['standardized_filename'],
+                        content_type='application/pdf',
+                        original_filename=original_filename
+                    )
+                    
+                    # Save file metadata to MongoDB
+                    files_collection.insert_one({
+                        "filename": processed_file['standardized_filename'],
+                        "original_filename": original_filename,
+                        "gridfs_id": gridfs_file_id,
+                        "size": processed_file['compressed_size'],
+                        "original_size": processed_file['original_size'],
+                        "compression_ratio": processed_file['compression_ratio'],
+                        "source": "google_drive",
+                        "drive_file_id": pdf_file['id'],
+                        "last_modified": time.time()
+                    })
+                    
+                    # Save to local temp directory
+                    temp_file_path = os.path.join(st.session_state.data_dir, processed_file['standardized_filename'])
+                    with open(temp_file_path, "wb") as f:
+                        f.write(processed_file['content'])
+                    
+                    # Add to session state uploaded files
+                    if processed_file['standardized_filename'] not in st.session_state.uploaded_files:
+                        st.session_state.uploaded_files.append(processed_file['standardized_filename'])
+                    
+                    # Update results statistics
+                    results['processed_files'] += 1
+                    results['total_size_original'] += processed_file['original_size']
+                    results['total_size_compressed'] += processed_file['compressed_size']
+                    results['files'].append({
+                        'original_filename': original_filename,
+                        'standardized_filename': processed_file['standardized_filename'],
+                        'status': 'success',
+                        'compression_ratio': processed_file['compression_ratio']
+                    })
+                except Exception as insert_error:
+                    # Record error during MongoDB insertion
+                    results['error_files'] += 1
+                    results['files'].append({
+                        'original_filename': original_filename,
+                        'status': 'error',
+                        'message': f'Failed to insert file: {str(insert_error)}'
+                    })
+            else:
+                # Record error during PDF processing
+                results['error_files'] += 1
+                results['files'].append({
+                    'original_filename': original_filename,
+                    'status': 'error',
+                    'message': 'Failed to process file'
+                })
+            
+            # Add a delay between requests to avoid rate limits (mainly for OpenAI API)
+            if i < len(pdf_files) - 1:  # Don't delay after the last file
+                time.sleep(1)  # 1 second delay
+        
+        # Clear the progress bar and status text
+        progress_bar.empty()
+        status_text.empty()
+        
+        # Calculate overall compression ratio
+        if results['total_size_original'] > 0:
+            results['overall_compression_ratio'] = (
+                (results['total_size_original'] - results['total_size_compressed']) / 
+                results['total_size_original'] * 100
+            )
+        else:
+            results['overall_compression_ratio'] = 0
+        
+        results['success'] = True
+        results['message'] = f"Successfully processed {results['processed_files']} out of {results['total_files']} files."
+        
+        # Trigger reindexing if files were added
+        if results['processed_files'] > 0:
+            st.session_state.index_hash = ""
+        
+        return results
+    
+    except Exception as e:
+        results['success'] = False
+        results['message'] = f"Error importing PDFs from Google Drive: {str(e)}"
+        import traceback
+        results['error_details'] = traceback.format_exc()
+        return results
+    finally:
+        # Ensure MongoDB client is closed
+        if mongo_client:
+            mongo_client.close()
+
 # Main Streamlit application
 def main():
-
     st.set_page_config(
         page_title="RAG- Kinetic Modeling",  # This changes the browser tab title
         page_icon="📚",  # This can be an emoji or a path to an image file
@@ -1028,8 +1819,8 @@ def main():
         if st.session_state.is_admin:
             st.sidebar.title("Knowledge Base Management")
             
-            # Create tabs for PDF and URL management
-            tab1, tab2, tab3 = st.sidebar.tabs(["PDF Documents", "URLs", "Embeddings"])
+            # Create tabs for PDF, URL, Google Drive and Embeddings
+            tab1, tab2, tab3, tab4 = st.sidebar.tabs(["PDF Documents", "URLs", "Google Drive", "Embeddings"])
             
             with tab1:
                 # Upload new PDF
@@ -1058,7 +1849,10 @@ def main():
                 # Display available PDFs
                 st.write("Available PDFs:")
                 
-                # Delete confirmation dialog for PDFs
+                # Add the Delete All Files button
+                add_delete_all_button_to_tab1()
+                
+                # Delete confirmation dialog for individual PDFs
                 if st.session_state.confirm_delete:
                     st.warning(f"Are you sure you want to delete {st.session_state.confirm_delete}?")
                     col1, col2 = st.columns(2)
@@ -1068,11 +1862,11 @@ def main():
                         cancel_delete()
                 
                 # Display PDF list with delete buttons
-                for pdf in st.session_state.uploaded_files:
+                for index, pdf in enumerate(st.session_state.uploaded_files):
                     col1, col2 = st.columns([3, 1])
                     col1.write(pdf)
-                    # Use a trash bin emoji for the delete button
-                    if col2.button("🗑️", key=f"delete_{pdf}", help="Delete this PDF"):
+                    # Use a unique key by adding the index
+                    if col2.button("🗑️", key=f"delete_{index}_{pdf}", help="Delete this PDF"):
                         set_delete_confirmation(pdf)
             
             with tab2:
@@ -1128,7 +1922,105 @@ def main():
                     if col2.button("🗑️", key=f"delete_url_{url}", help="Remove this URL"):
                         set_delete_url_confirmation(url)
 
+            # New Google Drive Tab
             with tab3:
+                st.write("Import PDFs from Google Drive")
+                
+                # Add info about the connected folder
+                st.info(f"Connected to Google Drive folder ID: {GOOGLE_DRIVE_FOLDER_ID}")
+                
+                # Add import button
+                if st.button("Import PDFs from Google Drive", key="import_gdrive"):
+                    with st.spinner("Connecting to Google Drive..."):
+                        import_results = import_pdfs_from_google_drive()
+                        
+                        if import_results['success']:
+                            st.success(import_results['message'])
+                            
+                            # Display statistics
+                            st.write("### Import Statistics")
+                            
+                            # Use columns for the stats display
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("Total Files", import_results['total_files'])
+                            with col2:
+                                st.metric("Successfully Processed", import_results['processed_files'])
+                            with col3:
+                                st.metric("Errors", import_results['error_files'])
+                            
+                            if import_results['processed_files'] > 0:
+                                # Show compression metrics
+                                st.write("### Compression Results")
+                                
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    original_size_mb = import_results['total_size_original'] / (1024 * 1024)
+                                    compressed_size_mb = import_results['total_size_compressed'] / (1024 * 1024)
+                                    st.metric("Original Size", f"{original_size_mb:.2f} MB")
+                                with col2:
+                                    st.metric("Compressed Size", f"{compressed_size_mb:.2f} MB", 
+                                             delta=f"-{import_results['overall_compression_ratio']:.1f}%")
+                                
+                                # Show file details in an expander
+                                with st.expander("View Processed Files"):
+                                    for file_info in import_results['files']:
+                                        if file_info['status'] == 'success':
+                                            st.write(f"✅ **{file_info['original_filename']}** → **{file_info['standardized_filename']}**")
+                                            st.write(f"   Compression: {file_info['compression_ratio']:.1f}% reduction")
+                                        elif file_info['status'] == 'skipped':
+                                            st.write(f"⏭️ **{file_info['original_filename']}** (skipped - already exists)")
+                                        else:
+                                            st.write(f"❌ **{file_info['original_filename']}** (error: {file_info.get('message', 'Unknown error')})")
+                                        st.write("---")
+                                        
+                                # Automatically update the files list
+                                st.session_state.uploaded_files = [
+                                    file_doc["filename"] for file_doc in st.session_state.files_collection.find({}, {"filename": 1, "_id": 0})
+                                ]
+
+                                # Use experimental_rerun to refresh the entire page
+                                st.rerun()
+                        else:
+                            st.error(import_results['message'])
+                            if 'error_details' in import_results:
+                                with st.expander("Error Details"):
+                                    st.code(import_results['error_details'])
+                
+                # Display information about naming conventions
+                with st.expander("PDF Naming Convention"):
+                    st.markdown("""
+                    ## Standard Naming Format
+                    All PDF files follow this format:
+                    **[Year]_[FirstAuthorLastName]_[PaperTitle]_[Category].pdf**
+                    
+                    ### Examples:
+                    * 2023_Smith_Kinetic-Modeling-In-Alzheimers-Disease_Brain.pdf
+                    * 2019_Johnson_Tracer-Kinetics-In-Lung-Tissue_Lung.pdf
+                    * 2021_Wang_Advanced-Optimization-Algorithms-For-Kinetic-Analysis_Advanced.pdf
+                    
+                    ### Guidelines for Each Element
+                    1. **Year [YYYY]**
+                       * 4-digit year format (e.g., 2023)
+                       * Unknown publication year uses the submission/preprint year followed by "pre" (e.g., 2023pre)
+                       
+                    2. **First Author's Last Name**
+                       * Only last name of the first author
+                       * Hyphenated last names include the hyphen (e.g., Smith-Jones)
+                       * No first names or initials
+                       
+                    3. **Paper Title**
+                       * For shorter titles, includes the full title with spaces replaced by hyphens
+                       * For longer titles, includes only the first 5-6 significant words
+                       * Articles (a, an, the) are removed when possible
+                       
+                    4. **Category**
+                       * Main category (Brain, Lung, Liver, etc.)
+                       * For multiple categories, uses the primary category
+                       * Subcategories use format: Brain-Neuroinflammation
+                    """)
+
+            with tab4:
                 st.write("Export Embeddings for Manifold Comparison")
                 
                 # Display information about the current index
@@ -1308,4 +2200,4 @@ if __name__ == "__main__":
     except Exception as e:
         import traceback
         st.error(f"An unexpected error occurred: {str(e)}")
-        st.error(traceback.format_exc())            
+        st.error(traceback.format_exc())    
