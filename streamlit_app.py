@@ -36,6 +36,8 @@ from googleapiclient.http import MediaIoBaseDownload
 from google.oauth2.credentials import Credentials
 import pikepdf
 import openai
+import uuid
+from datetime import datetime, timedelta
 
 # Add these constants to your existing constants
 GOOGLE_DRIVE_FOLDER_ID = "1w-6V_XZvNK6gOeFT61KZk1GLHg65brKR"  # Your Google Drive folder ID
@@ -79,7 +81,13 @@ SESSION_KEYS = [
     "question_text",
     "message_sent",
     "index_version_in_db",  # Track the version of the index stored in DB
-    "index_loaded_from_db"  # Flag to track if we successfully loaded from DB 
+    "index_loaded_from_db",  # Flag to track if we successfully loaded from DB 
+    "is_collaborator",  # Flag to identify collaborator user type
+    "collaborator_upload_success",  # Message for successful upload
+    "collaborator_upload_error",    # Error message for failed upload
+    "upload_preview_id",            # ID of upload being previewed
+    "upload_action_error",          # Error during upload approval/denial actions
+    "upload_action_success",        # Success message for upload actions
 ]
 
 
@@ -88,14 +96,430 @@ SESSION_KEYS = [
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
+# 1. Constants for temporary uploads
+TEMP_DB_NAME = "temp_collaborator_uploads"
+
 # Login page
+# 2. COLLABORATOR UPLOAD PAGE 
+def collaborator_upload_page():
+    """Page for collaborators to upload PDFs for review."""
+    st.title("Collaborator PDF Upload")
+    st.write("Upload your PDF for review by the admin team")
+    
+    # Initialize session state variables if they don't exist
+    if "collaborator_upload_success" not in st.session_state:
+        st.session_state.collaborator_upload_success = None
+    if "collaborator_upload_error" not in st.session_state:
+        st.session_state.collaborator_upload_error = None
+    
+    # Display any previous messages
+    if st.session_state.collaborator_upload_success:
+        st.success(st.session_state.collaborator_upload_success)
+        st.session_state.collaborator_upload_success = None
+    
+    if st.session_state.collaborator_upload_error:
+        st.error(st.session_state.collaborator_upload_error)
+        st.session_state.collaborator_upload_error = None
+    
+    uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
+    
+    if uploaded_file is not None:
+        # Show file info before upload
+        file_details = {
+            "Filename": uploaded_file.name,
+            "File size": f"{uploaded_file.size / 1024:.2f} KB"
+        }
+        
+        st.write("File details:")
+        for key, value in file_details.items():
+            st.write(f"- **{key}:** {value}")
+        
+        # Upload button with a dedicated action
+        if st.button("Submit for Review", key="submit_for_review_btn"):
+            # Generate a unique ID for the upload
+            upload_id = str(uuid.uuid4())
+            
+            try:
+                # Connect to temp database
+                temp_client = pymongo.MongoClient(os.getenv("MONGO_URI"))
+                temp_db = temp_client[TEMP_DB_NAME]
+                temp_fs = gridfs.GridFS(temp_db)
+                
+                # Create pending_uploads collection if it doesn't exist
+                if "pending_uploads" not in temp_db.list_collection_names():
+                    temp_db.create_collection("pending_uploads")
+                
+                # Prepare metadata for temporary storage
+                temp_upload_metadata = {
+                    "_id": upload_id,
+                    "filename": uploaded_file.name,
+                    "upload_timestamp": datetime.now(),
+                    "status": "pending",
+                    "original_size": uploaded_file.size
+                }
+                
+                # Store file in GridFS
+                file_id = temp_fs.put(
+                    uploaded_file.getvalue(), 
+                    filename=uploaded_file.name,
+                    metadata=temp_upload_metadata
+                )
+                
+                # Store metadata separately
+                temp_db.pending_uploads.insert_one({
+                    **temp_upload_metadata,
+                    "gridfs_id": file_id
+                })
+                
+                # Set success message
+                st.session_state.collaborator_upload_success = "PDF uploaded successfully and sent for review!"
+                st.rerun()
+                
+            except Exception as e:
+                st.session_state.collaborator_upload_error = f"Error uploading file: {str(e)}"
+                st.rerun()
+    
+    # Add some info text
+    st.markdown("""
+    ### Upload Guidelines
+    - Only PDF files are accepted
+    - PDFs will be reviewed by administrators before being added to the main database
+    - You will not receive notification when your PDF is approved - it will be available in the main system
+    - Please ensure uploaded PDFs are relevant to kinetic modeling research
+    """)
+    
+    # Add logout button
+    if st.button("Return to Login", key="collab_logout_btn"):
+        for key in SESSION_KEYS:
+            if key in st.session_state:
+                delattr(st.session_state, key)
+        st.session_state.current_page = 'login'
+        st.rerun()
+
+def show_pdf_preview_improved(upload, file_content):
+    """Improved PDF preview with wider layout."""
+    # Create a container for the preview
+    with st.expander("PDF Preview", expanded=True):
+        # Open the PDF document first
+        try:
+            pdf_document = fitz.open(stream=file_content, filetype="pdf")
+            
+            # Add download button with a unique key
+            download_key = f"download_{upload['_id']}"
+            st.download_button(
+                label="⬇️ Download PDF",
+                data=file_content,
+                file_name=upload['filename'],
+                mime="application/pdf",
+                key=download_key,
+                use_container_width=True
+            )
+
+            # Add documentation-like display of file details
+            st.write(f"**Filename:** {upload['filename']}")
+            st.write(f"**Total pages:** {pdf_document.page_count}")
+            st.write(f"**Size:** {upload['original_size'] / 1024:.2f} KB")
+            
+            # Display the first few pages as images
+            # Only show first 3 pages to avoid overloading the interface
+            max_preview_pages = min(3, pdf_document.page_count)
+            
+            # Use the full width of the container for better display
+            for page_num in range(max_preview_pages):
+                page = pdf_document[page_num]
+                
+                # Adjust the zoom factor for better visibility
+                zoom_factor = 2.0  # Increase the zoom for better clarity
+                pix = page.get_pixmap(matrix=fitz.Matrix(zoom_factor, zoom_factor))
+                img_bytes = pix.tobytes("png")
+                
+                # Add page indicator
+                st.write(f"**Page {page_num + 1}/{pdf_document.page_count}**")
+                
+                # Display the image with full width
+                st.image(
+                    img_bytes, 
+                    use_container_width=True
+                )
+                
+                # Add a separator between pages
+                if page_num < max_preview_pages - 1:
+                    st.markdown("---")
+            
+            if pdf_document.page_count > max_preview_pages:
+                st.info(f"Preview limited to first {max_preview_pages} pages. Download the PDF to view all {pdf_document.page_count} pages.")
+            
+        except Exception as e:
+            st.error(f"Error rendering PDF preview: {str(e)}")
+            st.write("PDF preview rendering failed. Please use the download button to view the file.")
+
+def collaborator_uploads_review_tab():
+    """Tab in admin interface to review collaborator uploads."""
+    st.write("## Collaborator PDF Uploads")
+    
+    try:
+        # Connect to temp database
+        mongo_client = pymongo.MongoClient(os.getenv("MONGO_URI"))
+        temp_db = mongo_client[TEMP_DB_NAME]
+        
+        # Make sure the collection exists
+        if "pending_uploads" not in temp_db.list_collection_names():
+            temp_db.create_collection("pending_uploads")
+        
+        # Fetch pending uploads
+        pending_uploads = list(temp_db.pending_uploads.find({"status": "pending"}))
+        
+        # Get recently approved uploads within the last 30 seconds
+        thirty_seconds_ago = datetime.now() - timedelta(seconds=30)
+        recently_approved_uploads = list(temp_db.pending_uploads.find({
+            "status": "approved", 
+            "approved_at": {"$gt": thirty_seconds_ago}
+        }))
+        
+        # If no pending uploads and no recent approvals, show info
+        if not pending_uploads and not recently_approved_uploads:
+            st.info("No pending uploads to review")
+            return
+        
+        # Show count of pending uploads
+        if pending_uploads:
+            st.write(f"Found {len(pending_uploads)} pending upload(s)")
+        
+        # Show recently approved uploads first with success message
+        for upload in recently_approved_uploads:
+            with st.container():
+                # Show a success message with nice styling
+                st.markdown(f"""
+                <div style="padding: 10px; background-color: rgba(0, 200, 0, 0.1); border-left: 5px solid #00c000; margin-bottom: 15px;">
+                    <h4 style="margin-top: 0; color: #00c000;">✅ Successfully Approved</h4>
+                    <p><b>Original:</b> {upload['filename']}</p>
+                    <p><b>Renamed to:</b> {upload.get('standardized_filename', 'Unknown')}</p>
+                    <p><i>This file has been added to the main database.</i></p>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        # Set up state variables for confirmation dialogs if they don't exist
+        if "confirm_approve_id" not in st.session_state:
+            st.session_state.confirm_approve_id = None
+        if "confirm_deny_id" not in st.session_state:
+            st.session_state.confirm_deny_id = None
+        
+        # Process each pending upload
+        for index, upload in enumerate(pending_uploads):
+            with st.container():
+                st.markdown("---")
+                st.subheader(upload['filename'])
+                
+                # Display file details
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write(f"**Upload Date:** {upload['upload_timestamp'].strftime('%Y-%m-%d %H:%M')}")
+                with col2:
+                    st.write(f"**Size:** {upload['original_size'] / 1024:.2f} KB")
+                
+                # Put the buttons in a centered layout with equal widths and consistent styling
+                button_cols = st.columns(3)
+                
+                # Preload file content for preview
+                temp_fs = gridfs.GridFS(temp_db)
+                file_content = temp_fs.get(upload['gridfs_id']).read()
+                
+                # Unique key for each preview button using index
+                unique_preview_key = f"preview_{index}_{upload['_id']}"
+                unique_approve_key = f"approve_{index}_{upload['_id']}"
+                unique_deny_key = f"deny_{index}_{upload['_id']}"
+                
+                # Preview Button
+                with button_cols[0]:
+                    if st.button("👁️ Preview", key=unique_preview_key, use_container_width=True):
+                        # Dynamically create session state for file content with unique key
+                        st.session_state[f"file_content_{unique_preview_key}"] = file_content
+                        
+                        preview_state_key = f"show_preview_{unique_preview_key}"
+                        if preview_state_key not in st.session_state:
+                            st.session_state[preview_state_key] = True
+                        else:
+                            st.session_state[preview_state_key] = not st.session_state[preview_state_key]
+                        st.rerun()
+                
+                # Approve Button
+                with button_cols[1]:
+                    if st.button("✅ Approve", key=unique_approve_key, use_container_width=True):
+                        st.session_state.confirm_approve_id = upload['_id']
+                        st.session_state.confirm_deny_id = None
+                        st.rerun()
+                
+                # Deny Button
+                with button_cols[2]:
+                    if st.button("❌ Deny", key=unique_deny_key, use_container_width=True):
+                        st.session_state.confirm_deny_id = upload['_id']
+                        st.session_state.confirm_approve_id = None
+                        st.rerun()
+                
+                # Show preview if requested - with improved layout
+                preview_state_key = f"show_preview_{unique_preview_key}"
+                if preview_state_key in st.session_state and st.session_state[preview_state_key]:
+                    show_pdf_preview_improved(
+                        upload, 
+                        st.session_state[f"file_content_{unique_preview_key}"]
+                    )
+                
+                # Show confirmation dialog for approval
+                if st.session_state.confirm_approve_id == upload['_id']:
+                    st.warning(f"⚠️ Are you sure you want to approve '{upload['filename']}'?")
+                    confirm_cols = st.columns([1, 1])
+                    
+                    with confirm_cols[0]:
+                        if st.button("✓ Yes, Approve", key=f"confirm_approve_{upload['_id']}", use_container_width=True):
+                            with st.spinner(f"Processing '{upload['filename']}'..."):
+                                # Process the approval
+                                standardized_filename = process_approval_with_feedback(upload, temp_db)
+                                
+                                if standardized_filename:
+                                    # Clear the confirmation state
+                                    st.session_state.confirm_approve_id = None
+                                    st.rerun()
+                    
+                    with confirm_cols[1]:
+                        if st.button("✗ Cancel", key=f"cancel_approve_{upload['_id']}", use_container_width=True):
+                            st.session_state.confirm_approve_id = None
+                            st.rerun()
+                
+                # Show confirmation dialog for denial
+                if st.session_state.confirm_deny_id == upload['_id']:
+                    st.warning(f"⚠️ Are you sure you want to deny '{upload['filename']}'?")
+                    confirm_cols = st.columns([1, 1])
+                    
+                    with confirm_cols[0]:
+                        if st.button("✓ Yes, Deny", key=f"confirm_deny_{upload['_id']}", use_container_width=True):
+                            with st.spinner(f"Removing '{upload['filename']}'..."):
+                                success = process_denial(upload, temp_db)
+                                if success:
+                                    # Clear the confirmation state
+                                    st.session_state.confirm_deny_id = None
+                                    # Add short delay to show message
+                                    time.sleep(1)
+                                    st.rerun()
+                    
+                    with confirm_cols[1]:
+                        if st.button("✗ Cancel", key=f"cancel_deny_{upload['_id']}", use_container_width=True):
+                            st.session_state.confirm_deny_id = None
+                            st.rerun()
+    
+    except Exception as e:
+        st.error(f"Error loading collaborator uploads: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
+
+
+def process_approval_with_feedback(upload, temp_db):
+    """Process the approval of a collaborator upload and return the standardized filename."""
+    try:
+        # Connect to main database
+        mongo_client = pymongo.MongoClient(os.getenv("MONGO_URI"))
+        main_db = mongo_client["rag_system"]
+        
+        # Get GridFS instances
+        temp_fs = gridfs.GridFS(temp_db)
+        main_fs = gridfs.GridFS(main_db)
+        
+        # Get file content
+        file_content = temp_fs.get(upload['gridfs_id']).read()
+        
+        # Process the file (standardize name, compress)
+        standardized_filename = get_standardized_filename(
+            upload['filename'], 
+            file_content
+        )
+        
+        # Compress the PDF
+        compressed_content = compress_pdf(file_content)
+        
+        # Calculate compression stats
+        original_size = len(file_content)
+        compressed_size = len(compressed_content)
+        compression_ratio = ((original_size - compressed_size) / original_size) * 100 if original_size > 0 else 0
+        
+        # Save to main GridFS
+        main_file_id = main_fs.put(
+            compressed_content,
+            filename=standardized_filename,
+            content_type='application/pdf',
+            original_filename=upload['filename']
+        )
+        
+        # Save metadata to main files collection
+        main_db.files.insert_one({
+            "filename": standardized_filename,
+            "original_filename": upload['filename'],
+            "gridfs_id": main_file_id,
+            "size": compressed_size,
+            "original_size": original_size,
+            "compression_ratio": compression_ratio,
+            "source": "collaborator_upload",
+            "upload_id": upload['_id'],
+            "last_modified": time.time()
+        })
+        
+        # Also save to local temp directory for immediate access
+        temp_file_path = os.path.join(st.session_state.data_dir, standardized_filename)
+        with open(temp_file_path, "wb") as f:
+            f.write(compressed_content)
+        
+        # Update the session state list of files
+        if standardized_filename not in st.session_state.uploaded_files:
+            st.session_state.uploaded_files.append(standardized_filename)
+        
+        # Force a reset of the index to include the new file
+        st.session_state.index_hash = ""
+        
+        # Store the rename info for feedback with timestamp
+        temp_db.pending_uploads.update_one(
+            {"_id": upload['_id']},
+            {"$set": {
+                "status": "approved",
+                "approved_at": datetime.now(),  # Exact timestamp
+                "standardized_filename": standardized_filename
+            }}
+        )
+        
+        return standardized_filename
+        
+    except Exception as e:
+        st.error(f"Error approving upload: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
+        return None
+
+# Process denial function (same as before)
+def process_denial(upload, temp_db):
+    """Process the denial of a collaborator upload."""
+    try:
+        # Get GridFS instance
+        temp_fs = gridfs.GridFS(temp_db)
+        
+        # Delete file from GridFS
+        temp_fs.delete(upload['gridfs_id'])
+        
+        # Delete metadata from collection
+        temp_db.pending_uploads.delete_one({"_id": upload['_id']})
+        
+        return True
+        
+    except Exception as e:
+        st.error(f"Error denying upload: {str(e)}")
+        return False
+
+# 7. UPDATE LOGIN PAGE TO INCLUDE COLLABORATOR OPTION
 def login_page():
+    """Updated login page with collaborator option."""
     st.markdown("<h1 style='text-align: center;'>Kinetic Modeling - RAG</h1>", unsafe_allow_html=True)
     st.markdown("<h2 style='text-align: center;'>Access Portal</h2>", unsafe_allow_html=True)
     
-    # Create a container to center the columns
-    col1, col2 = st.columns([1, 1])
+    # Create a three-column layout
+    col1, col2, col3 = st.columns(3)
     
+    # Admin Login
     with col1:
         st.markdown("<div style='text-align: center;'>", unsafe_allow_html=True)
         if st.button("Admin Login", key="admin_login_btn", use_container_width=True):
@@ -103,15 +527,28 @@ def login_page():
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
     
+    # User Access
     with col2:
         st.markdown("<div style='text-align: center;'>", unsafe_allow_html=True)
         if st.button("User Access", key="user_login_btn", use_container_width=True):
             st.session_state.logged_in = True
             st.session_state.is_admin = False
+            st.session_state.is_collaborator = False
             st.session_state.current_page = 'query'
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
-        
+    
+    # Collaborator
+    with col3:
+        st.markdown("<div style='text-align: center;'>", unsafe_allow_html=True)
+        if st.button("Collaborator", key="collaborator_login_btn", use_container_width=True):
+            st.session_state.logged_in = True
+            st.session_state.is_admin = False
+            st.session_state.is_collaborator = True
+            st.session_state.current_page = 'collaborator_upload'
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
 # Admin login form
 def admin_login_form():
     st.title("Admin Login")
@@ -151,6 +588,12 @@ def initialize_session_state():
         st.session_state.is_admin = False
         st.session_state.current_page = 'login'
         st.session_state.chat_history = [] 
+        st.session_state.is_collaborator = False
+        st.session_state.collaborator_upload_success = None
+        st.session_state.collaborator_upload_error = None
+        st.session_state.upload_preview_id = None
+        st.session_state.upload_action_error = None
+        st.session_state.upload_action_success = None
         
         # Initialize other keys from previous implementation
         st.session_state.data_dir = "temp_data"
@@ -1772,6 +2215,8 @@ def main():
         login_page()
     elif st.session_state.current_page == 'admin_login':
         admin_login_form()
+    elif st.session_state.current_page == 'collaborator_upload':
+        collaborator_upload_page()
     elif st.session_state.logged_in:
         # Title
         st.title("Kinetic Modeling - RAG")
@@ -1798,7 +2243,7 @@ def main():
             st.sidebar.title("Knowledge Base Management")
             
             # Create tabs for PDF and URL management
-            tab1, tab2, tab3, tab4 = st.sidebar.tabs(["PDF Documents", "URLs", "Embeddings", "Google Drive"])
+            tab1, tab2, tab3, tab4, tab5 = st.sidebar.tabs(["PDF Documents", "URLs", "Embeddings", "Google Drive", "Collaborator Uploads"])
             
             with tab1:
                 st.write("Upload a new PDF")
@@ -2056,7 +2501,10 @@ def main():
                     st.warning("No index available. Please add documents and index them first.")   
 
             with tab4:
-                google_drive_tab()                 
+                google_drive_tab()    
+
+            with tab5:
+                collaborator_uploads_review_tab()                 
             
             # Force reindex button (outside tabs)
             if st.sidebar.button("⟳ Reindex All", key="force_reindex", help="Force reindex all documents and URLs"):
