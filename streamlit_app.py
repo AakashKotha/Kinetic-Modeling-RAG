@@ -55,7 +55,12 @@ SESSION_KEYS = [
     "url_delete_error_message", 
     "upload_success_message",
     "chat_history", 
-    "user_message"  
+    "user_message",
+    "q1_clicked",
+    "q2_clicked", 
+    "q3_clicked",
+    "question_text",
+    "message_sent"  
 ]
 
 # Function to hash password
@@ -647,23 +652,73 @@ def display_chat_interface(query_engine):
                 "Can you help me understand the knowledge base?"
             ]
         
+        # Create session state variables to track button clicks if they don't exist
+        if "q1_clicked" not in st.session_state:
+            st.session_state.q1_clicked = False
+        if "q2_clicked" not in st.session_state:
+            st.session_state.q2_clicked = False
+        if "q3_clicked" not in st.session_state:
+            st.session_state.q3_clicked = False
+            
+        # Create a session state variable to hold the question text
+        if "question_text" not in st.session_state:
+            st.session_state.question_text = ""
+        
+        # Function to handle button clicks
+        def handle_q1_click():
+            st.session_state.q1_clicked = True
+            st.session_state.question_text = suggested_questions[0]
+        
+        def handle_q2_click():
+            st.session_state.q2_clicked = True
+            st.session_state.question_text = suggested_questions[1]
+        
+        def handle_q3_click():
+            st.session_state.q3_clicked = True
+            st.session_state.question_text = suggested_questions[2]
+        
         # Display clickable buttons for each suggested question
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            if st.button(suggested_questions[0], key="suggested_q1"):
-                process_new_message(suggested_questions[0], query_engine)
-                st.rerun()
+            st.button(suggested_questions[0], key="suggested_q1", on_click=handle_q1_click)
                 
         with col2:
-            if st.button(suggested_questions[1], key="suggested_q2"):
-                process_new_message(suggested_questions[1], query_engine)
-                st.rerun()
+            st.button(suggested_questions[1], key="suggested_q2", on_click=handle_q2_click)
                 
         with col3:
-            if st.button(suggested_questions[2], key="suggested_q3"):
-                process_new_message(suggested_questions[2], query_engine)
-                st.rerun()
+            st.button(suggested_questions[2], key="suggested_q3", on_click=handle_q3_click)
+    
+    # Process question clicks at the end of the rendering cycle
+    if hasattr(st.session_state, 'q1_clicked') and st.session_state.q1_clicked:
+        question = st.session_state.question_text
+        st.session_state.q1_clicked = False
+        st.session_state.question_text = ""
+        process_new_message(question, query_engine)
+        st.rerun()
+    elif hasattr(st.session_state, 'q2_clicked') and st.session_state.q2_clicked:
+        question = st.session_state.question_text
+        st.session_state.q2_clicked = False
+        st.session_state.question_text = ""
+        process_new_message(question, query_engine)
+        st.rerun()
+    elif hasattr(st.session_state, 'q3_clicked') and st.session_state.q3_clicked:
+        question = st.session_state.question_text
+        st.session_state.q3_clicked = False
+        st.session_state.question_text = ""
+        process_new_message(question, query_engine)
+        st.rerun()
+    
+    # Add a callback for when the send button is pressed
+    def handle_send():
+        if "user_message" in st.session_state and st.session_state.user_message:
+            # This is needed to make sure Streamlit reinitializes the text area with an empty value
+            message = st.session_state.user_message
+            # Use a flag to indicate message was sent instead of modifying the input directly
+            if "message_sent" not in st.session_state:
+                st.session_state.message_sent = False
+            st.session_state.message_sent = True
+            process_new_message(message, query_engine)
     
     # Use a container for better alignment control
     with st.container():
@@ -698,19 +753,24 @@ def display_chat_interface(query_engine):
             # Get the appropriate placeholder
             placeholder = "Enter your query" if len(st.session_state.chat_history) == 0 else "Enter your follow-up question"
             
+            # Reset text area if a message was just sent
+            if hasattr(st.session_state, "message_sent") and st.session_state.message_sent:
+                st.session_state.user_message = ""
+                st.session_state.message_sent = False
+                
             user_message = st.text_area("", 
-                                        key="user_message", 
-                                        placeholder=placeholder,
-                                        label_visibility="collapsed")
+                                      key="user_message", 
+                                      placeholder=placeholder,
+                                      label_visibility="collapsed")
         
         # Place the send button in the third column 
         with col3:
-            send_pressed = st.button("Send", key="send_message", use_container_width=True)
+            send_pressed = st.button("Send", key="send_message", on_click=handle_send, use_container_width=True)
     
-    # Process message
-    if send_pressed and user_message:
-        process_new_message(user_message, query_engine)
-        st.rerun()
+    # We don't need this anymore since we're using the on_click handler
+    # if send_pressed and user_message:
+    #     process_new_message(user_message, query_engine)
+    #     st.rerun()
 
 def process_new_message(user_message, query_engine):
     if not user_message:
