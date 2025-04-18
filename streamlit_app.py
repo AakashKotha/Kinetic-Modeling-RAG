@@ -1801,8 +1801,6 @@ def main():
             tab1, tab2, tab3, tab4 = st.sidebar.tabs(["PDF Documents", "URLs", "Embeddings", "Google Drive"])
             
             with tab1:
-                
-                # Upload new PDF
                 st.write("Upload a new PDF")
                 uploaded_file = st.file_uploader("PDF Upload", type="pdf", key="file_uploader", 
                                                 accept_multiple_files=False, label_visibility="collapsed")
@@ -1810,7 +1808,6 @@ def main():
                 # Display success/error messages if they exist
                 if st.session_state.upload_success_message:
                     st.success(st.session_state.upload_success_message)
-                    # Clear the message after displaying once
                     st.session_state.upload_success_message = None
                     
                 if st.session_state.delete_success_message:
@@ -1828,7 +1825,7 @@ def main():
                 # Add another divider before the PDF list
                 st.markdown("---")
 
-                 # Add "Delete All" button at the top if PDFs exist
+                # Add "Delete All" button at the top if PDFs exist
                 if st.session_state.uploaded_files:
                     if st.button("🗑️ Delete All PDFs", key="delete_all_pdfs", help="Delete all PDFs"):
                         st.session_state.confirm_delete_all = True
@@ -1853,6 +1850,9 @@ def main():
                 if st.session_state.uploaded_files:
                     st.markdown("---")
 
+                # Add search box for PDFs
+                search_query = st.text_input("Search PDFs", placeholder="Enter filename to search...", key="pdf_search_input")
+                
                 # Display available PDFs heading
                 st.write("Available PDFs:")    
                     
@@ -1865,13 +1865,25 @@ def main():
                     if col2.button("Cancel", key="confirm_no"):
                         cancel_delete()
                 
+                # Filter PDFs based on search query
+                filtered_pdfs = [
+                    pdf for pdf in st.session_state.uploaded_files 
+                    if search_query.lower() in pdf.lower()
+                ]
+                
                 # Display PDF list with delete buttons
-                for pdf in st.session_state.uploaded_files:
+                for pdf in filtered_pdfs:
                     col1, col2 = st.columns([3, 1])
                     col1.write(pdf)
                     # Use a trash bin emoji for the delete button
                     if col2.button("🗑️", key=f"delete_{pdf}", help="Delete this PDF"):
-                        set_delete_confirmation(pdf)         
+                        set_delete_confirmation(pdf)
+                
+                # Show message if no PDFs match the search
+                if not filtered_pdfs and search_query:
+                    st.info(f"No PDFs found matching '{search_query}'")
+                elif not filtered_pdfs and not search_query and not st.session_state.uploaded_files:
+                    st.info("No PDFs uploaded yet")       
             
             with tab2:
                 # Add new URL
