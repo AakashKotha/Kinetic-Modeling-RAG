@@ -45,6 +45,7 @@ SESSION_KEYS = [
     "urls", 
     "confirm_delete", 
     "confirm_delete_url", 
+    "confirm_delete_all",
     "url_input", 
     "data_dir", 
     "should_rerun", 
@@ -1047,6 +1048,44 @@ def get_binary_download_link(file_content, file_name, display_text):
     href = f'<a href="data:application/octet-stream;base64,{b64}" download="{file_name}">{display_text}</a>'
     return href
 
+# Function to delete all PDFs
+def delete_all_pdfs():
+    try:
+        # Remove all files from GridFS
+        for file_doc in st.session_state.files_collection.find({}, {"gridfs_id": 1}):
+            try:
+                if "gridfs_id" in file_doc:
+                    st.session_state.fs.delete(file_doc["gridfs_id"])
+            except Exception as e:
+                st.warning(f"Error deleting file from GridFS: {str(e)}")
+        
+        # Clear the files collection
+        st.session_state.files_collection.delete_many({})
+        
+        # Remove files from temp directory
+        for filename in os.listdir(st.session_state.data_dir):
+            if filename.endswith(".pdf"):
+                try:
+                    os.remove(os.path.join(st.session_state.data_dir, filename))
+                except Exception as e:
+                    st.warning(f"Error removing file from temp directory: {str(e)}")
+        
+        # Clear the uploaded_files list
+        st.session_state.uploaded_files = []
+        
+        # Force complete reindex
+        st.session_state.index_hash = ""
+        
+        # Set success message
+        st.session_state.delete_success_message = "All PDFs have been deleted"
+        
+        return True
+    except Exception as e:
+        st.session_state.delete_error_message = f"Error deleting all PDFs: {str(e)}"
+        import traceback
+        st.error(traceback.format_exc())
+        return False
+
 # Main Streamlit application
 def main():
 
@@ -1092,6 +1131,7 @@ def main():
             tab1, tab2, tab3 = st.sidebar.tabs(["PDF Documents", "URLs", "Embeddings"])
             
             with tab1:
+                
                 # Upload new PDF
                 st.write("Upload a new PDF")
                 uploaded_file = st.file_uploader("PDF Upload", type="pdf", key="file_uploader", 
@@ -1115,10 +1155,38 @@ def main():
                 if uploaded_file is not None and uploaded_file.name not in st.session_state.uploaded_files:
                     handle_file_upload(uploaded_file)
                 
-                # Display available PDFs
-                st.write("Available PDFs:")
+                # Add another divider before the PDF list
+                st.markdown("---")
+
+                 # Add "Delete All" button at the top if PDFs exist
+                if st.session_state.uploaded_files:
+                    if st.button("🗑️ Delete All PDFs", key="delete_all_pdfs", help="Delete all PDFs"):
+                        st.session_state.confirm_delete_all = True
+                        st.rerun()
                 
-                # Delete confirmation dialog for PDFs
+                # Add confirmation dialog for "Delete All PDFs"
+                if "confirm_delete_all" not in st.session_state:
+                    st.session_state.confirm_delete_all = False
+                    
+                if st.session_state.confirm_delete_all:
+                    st.warning("⚠️ Are you sure you want to delete ALL PDFs? This action cannot be undone.")
+                    col1, col2 = st.columns(2)
+                    if col1.button("Yes, Delete All", key="confirm_all_yes"):
+                        if delete_all_pdfs():
+                            st.session_state.confirm_delete_all = False
+                            st.rerun()
+                    if col2.button("Cancel", key="confirm_all_no"):
+                        st.session_state.confirm_delete_all = False
+                        st.rerun()
+                
+                # Add divider after delete all option
+                if st.session_state.uploaded_files:
+                    st.markdown("---")
+
+                # Display available PDFs heading
+                st.write("Available PDFs:")    
+                    
+                # Delete confirmation dialog for individual PDFs
                 if st.session_state.confirm_delete:
                     st.warning(f"Are you sure you want to delete {st.session_state.confirm_delete}?")
                     col1, col2 = st.columns(2)
