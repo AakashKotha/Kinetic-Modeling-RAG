@@ -601,39 +601,48 @@ def cancel_delete():
     st.rerun()
 
 def generate_suggested_questions(query_engine, force_refresh=False):
-    """Generate suggested questions based on the current content in the knowledge base."""
     try:
-        # System prompt to generate questions based on current knowledge base content
+        # Add some randomness instruction to the prompt
         system_prompt = """
-        Based on the current content in the knowledge base, generate 3 diverse and interesting starter questions 
+        Based on the current content in the knowledge base, generate 5 diverse and interesting starter questions 
         that users might want to ask. The questions should:
         
         1. Be directly answerable from the CURRENT knowledge base content
         2. Cover different topics or aspects of the available documents
         3. Be concise (10 words or less) but specific enough to be meaningful
-        4. Reflect the most recent and relevant information in the documents
+        4. Focus on different documents if possible, not just the most recent one
         5. Be in the form of questions (end with ?)
+
+        IMPORTANT GUIDELINES:
+        - DO NOT mention specific author names or paper titles in the questions
+        - DO NOT reference specific page numbers or sections like "page 1" or "section 3.2"
+        - Focus on the concepts and topics rather than the sources
+        - Make questions accessible to someone who hasn't read the documents yet
+        - Questions should be general enough that a new user would understand them
         
-        IMPORTANT: Only generate questions based on the CURRENT documents available.
+        Try to be creative and generate questions that explore different aspects of the knowledge base.
         
         Format the response as a numbered list with just the questions, no additional text.
         """
 
-        # Use the query engine to generate suggestions
+        # Get more questions than we need
         response = query_engine.query(system_prompt)
         
         # Parse the response to extract the questions
         suggested_questions = []
         for line in response.response.strip().split('\n'):
-            # Look for numbered lines (1., 2., 3., etc.)
             if line.strip() and (line.strip()[0].isdigit() and line.strip()[1:3] in ['. ', '? ', ') ']):
-                # Extract just the question, removing the number and any trailing punctuation
                 question = line.strip()[3:].strip()
                 if question:
                     suggested_questions.append(question)
         
-        # If we didn't get exactly 3 questions, provide fallbacks based on current content
-        if len(suggested_questions) != 3:
+        # If we got enough questions, randomly select 3
+        if len(suggested_questions) >= 4:
+            import random
+            return random.sample(suggested_questions, 3)
+        
+        # Otherwise use the fallbacks
+        if len(suggested_questions) < 3:
             suggested_questions = [
                 "What documents are currently in the knowledge base?",
                 "What topics are covered in the available sources?",
@@ -643,7 +652,7 @@ def generate_suggested_questions(query_engine, force_refresh=False):
         return suggested_questions
     
     except Exception:
-        # If there's any error, use generic suggestions that prompt exploration
+        # Default fallbacks
         return [
             "What documents are currently available?",
             "What kind of information can I find here?",
