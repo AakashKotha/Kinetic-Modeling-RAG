@@ -59,6 +59,7 @@ SESSION_KEYS = [
     "urls", 
     "confirm_delete", 
     "confirm_delete_url", 
+    "confirm_delete_all",
     "url_input", 
     "data_dir", 
     "should_rerun", 
@@ -69,8 +70,17 @@ SESSION_KEYS = [
     "url_delete_error_message", 
     "upload_success_message",
     "chat_history", 
+<<<<<<< Updated upstream
     "user_message",    
     "confirm_delete_all"   
+=======
+    "user_message",
+    "q1_clicked",
+    "q2_clicked", 
+    "q3_clicked",
+    "question_text",
+    "message_sent"
+>>>>>>> Stashed changes
 ]
 
 # Add these constants to your existing constants
@@ -678,23 +688,73 @@ def display_chat_interface(query_engine):
                 "Can you help me understand the knowledge base?"
             ]
         
+        # Create session state variables to track button clicks if they don't exist
+        if "q1_clicked" not in st.session_state:
+            st.session_state.q1_clicked = False
+        if "q2_clicked" not in st.session_state:
+            st.session_state.q2_clicked = False
+        if "q3_clicked" not in st.session_state:
+            st.session_state.q3_clicked = False
+            
+        # Create a session state variable to hold the question text
+        if "question_text" not in st.session_state:
+            st.session_state.question_text = ""
+        
+        # Function to handle button clicks
+        def handle_q1_click():
+            st.session_state.q1_clicked = True
+            st.session_state.question_text = suggested_questions[0]
+        
+        def handle_q2_click():
+            st.session_state.q2_clicked = True
+            st.session_state.question_text = suggested_questions[1]
+        
+        def handle_q3_click():
+            st.session_state.q3_clicked = True
+            st.session_state.question_text = suggested_questions[2]
+        
         # Display clickable buttons for each suggested question
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            if st.button(suggested_questions[0], key="suggested_q1"):
-                process_new_message(suggested_questions[0], query_engine)
-                st.rerun()
+            st.button(suggested_questions[0], key="suggested_q1", on_click=handle_q1_click)
                 
         with col2:
-            if st.button(suggested_questions[1], key="suggested_q2"):
-                process_new_message(suggested_questions[1], query_engine)
-                st.rerun()
+            st.button(suggested_questions[1], key="suggested_q2", on_click=handle_q2_click)
                 
         with col3:
-            if st.button(suggested_questions[2], key="suggested_q3"):
-                process_new_message(suggested_questions[2], query_engine)
-                st.rerun()
+            st.button(suggested_questions[2], key="suggested_q3", on_click=handle_q3_click)
+    
+    # Process question clicks at the end of the rendering cycle
+    if hasattr(st.session_state, 'q1_clicked') and st.session_state.q1_clicked:
+        question = st.session_state.question_text
+        st.session_state.q1_clicked = False
+        st.session_state.question_text = ""
+        process_new_message(question, query_engine)
+        st.rerun()
+    elif hasattr(st.session_state, 'q2_clicked') and st.session_state.q2_clicked:
+        question = st.session_state.question_text
+        st.session_state.q2_clicked = False
+        st.session_state.question_text = ""
+        process_new_message(question, query_engine)
+        st.rerun()
+    elif hasattr(st.session_state, 'q3_clicked') and st.session_state.q3_clicked:
+        question = st.session_state.question_text
+        st.session_state.q3_clicked = False
+        st.session_state.question_text = ""
+        process_new_message(question, query_engine)
+        st.rerun()
+    
+    # Add a callback for when the send button is pressed
+    def handle_send():
+        if "user_message" in st.session_state and st.session_state.user_message:
+            # This is needed to make sure Streamlit reinitializes the text area with an empty value
+            message = st.session_state.user_message
+            # Use a flag to indicate message was sent instead of modifying the input directly
+            if "message_sent" not in st.session_state:
+                st.session_state.message_sent = False
+            st.session_state.message_sent = True
+            process_new_message(message, query_engine)
     
     # Use a container for better alignment control
     with st.container():
@@ -729,19 +789,24 @@ def display_chat_interface(query_engine):
             # Get the appropriate placeholder
             placeholder = "Enter your query" if len(st.session_state.chat_history) == 0 else "Enter your follow-up question"
             
+            # Reset text area if a message was just sent
+            if hasattr(st.session_state, "message_sent") and st.session_state.message_sent:
+                st.session_state.user_message = ""
+                st.session_state.message_sent = False
+                
             user_message = st.text_area("", 
-                                        key="user_message", 
-                                        placeholder=placeholder,
-                                        label_visibility="collapsed")
+                                      key="user_message", 
+                                      placeholder=placeholder,
+                                      label_visibility="collapsed")
         
         # Place the send button in the third column 
         with col3:
-            send_pressed = st.button("Send", key="send_message", use_container_width=True)
+            send_pressed = st.button("Send", key="send_message", on_click=handle_send, use_container_width=True)
     
-    # Process message
-    if send_pressed and user_message:
-        process_new_message(user_message, query_engine)
-        st.rerun()
+    # We don't need this anymore since we're using the on_click handler
+    # if send_pressed and user_message:
+    #     process_new_message(user_message, query_engine)
+    #     st.rerun()
 
 def process_new_message(user_message, query_engine):
     if not user_message:
@@ -1018,6 +1083,7 @@ def get_binary_download_link(file_content, file_name, display_text):
     href = f'<a href="data:application/octet-stream;base64,{b64}" download="{file_name}">{display_text}</a>'
     return href
 
+<<<<<<< Updated upstream
 # Add this function to your code
 def delete_all_files():
     """
@@ -1778,6 +1844,45 @@ def import_pdfs_from_google_drive():
         # Ensure MongoDB client is closed
         if mongo_client:
             mongo_client.close()
+=======
+# Function to delete all PDFs
+def delete_all_pdfs():
+    try:
+        # Remove all files from GridFS
+        for file_doc in st.session_state.files_collection.find({}, {"gridfs_id": 1}):
+            try:
+                if "gridfs_id" in file_doc:
+                    st.session_state.fs.delete(file_doc["gridfs_id"])
+            except Exception as e:
+                st.warning(f"Error deleting file from GridFS: {str(e)}")
+        
+        # Clear the files collection
+        st.session_state.files_collection.delete_many({})
+        
+        # Remove files from temp directory
+        for filename in os.listdir(st.session_state.data_dir):
+            if filename.endswith(".pdf"):
+                try:
+                    os.remove(os.path.join(st.session_state.data_dir, filename))
+                except Exception as e:
+                    st.warning(f"Error removing file from temp directory: {str(e)}")
+        
+        # Clear the uploaded_files list
+        st.session_state.uploaded_files = []
+        
+        # Force complete reindex
+        st.session_state.index_hash = ""
+        
+        # Set success message
+        st.session_state.delete_success_message = "All PDFs have been deleted"
+        
+        return True
+    except Exception as e:
+        st.session_state.delete_error_message = f"Error deleting all PDFs: {str(e)}"
+        import traceback
+        st.error(traceback.format_exc())
+        return False    
+>>>>>>> Stashed changes
 
 # Main Streamlit application
 def main():
@@ -1861,6 +1966,21 @@ def main():
                     if col2.button("Cancel", key="confirm_no"):
                         cancel_delete()
                 
+                # Add confirmation dialog for "Delete All PDFs"
+                if "confirm_delete_all" not in st.session_state:
+                    st.session_state.confirm_delete_all = False
+                    
+                if st.session_state.confirm_delete_all:
+                    st.warning("⚠️ Are you sure you want to delete ALL PDFs? This action cannot be undone.")
+                    col1, col2 = st.columns(2)
+                    if col1.button("Yes, Delete All", key="confirm_all_yes"):
+                        if delete_all_pdfs():
+                            st.session_state.confirm_delete_all = False
+                            st.rerun()
+                    if col2.button("Cancel", key="confirm_all_no"):
+                        st.session_state.confirm_delete_all = False
+                        st.rerun()
+                
                 # Display PDF list with delete buttons
                 for index, pdf in enumerate(st.session_state.uploaded_files):
                     col1, col2 = st.columns([3, 1])
@@ -1868,7 +1988,13 @@ def main():
                     # Use a unique key by adding the index
                     if col2.button("🗑️", key=f"delete_{index}_{pdf}", help="Delete this PDF"):
                         set_delete_confirmation(pdf)
-            
+                
+                # Add "Delete All" button if PDFs exist
+                if st.session_state.uploaded_files:
+                    if st.button("🗑️ Delete All PDFs", key="delete_all_pdfs", help="Delete all PDFs"):
+                        st.session_state.confirm_delete_all = True
+                        st.rerun()
+                        
             with tab2:
                 # Add new URL
                 st.write("Add a new URL")
