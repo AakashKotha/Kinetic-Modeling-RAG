@@ -61,8 +61,12 @@ SESSION_KEYS = [
     "q2_clicked", 
     "q3_clicked",
     "question_text",
-    "message_sent"  
+    "message_sent",
+    "index_version_in_db",  # Track the version of the index stored in DB
+    "index_loaded_from_db"  # Flag to track if we successfully loaded from DB 
 ]
+
+
 
 # Function to hash password
 def hash_password(password):
@@ -165,8 +169,10 @@ def initialize_session_state():
             mongo_client.admin.command('ping')
             
             db = mongo_client["rag_system"]
+            # Set the collections after db is defined
             st.session_state.urls_collection = db["urls"]
             st.session_state.files_collection = db["files"]
+            st.session_state.index_collection = db["index"]  # Now db is defined
             st.session_state.fs = gridfs.GridFS(db)
             
             # Load initial files and URLs
@@ -1085,6 +1091,78 @@ def delete_all_pdfs():
         import traceback
         st.error(traceback.format_exc())
         return False
+    
+# Function to save index to MongoDB
+def save_index_to_mongodb(index, hash_value):
+    """Save the index to MongoDB for persistence"""
+    try:
+        # Serialize the index to bytes
+        index_bytes = BytesIO()
+        pickle.dump(index, index_bytes)
+        index_bytes.seek(0)
+        
+        # Save to GridFS
+        existing_index = st.session_state.index_collection.find_one({})
+        if existing_index and "gridfs_id" in existing_index:
+            try:
+                # Delete old index
+                st.session_state.fs.delete(existing_index["gridfs_id"])
+            except Exception as e:
+                st.warning(f"Error deleting old index: {str(e)}")
+        
+        # Store new index
+        index_id = st.session_state.fs.put(
+            index_bytes.getvalue(),
+            filename="vector_index",
+            content_type="application/octet-stream",
+            chunkSize=1048576  # 1MB chunks
+        )
+        
+        # Update or insert metadata document
+        st.session_state.index_collection.delete_many({})
+        st.session_state.index_collection.insert_one({
+            "gridfs_id": index_id,
+            "hash": hash_value,
+            "timestamp": time.time(),
+            "doc_count": len(st.session_state.uploaded_files),
+            "url_count": len(st.session_state.urls)
+        })
+        
+        # Update session state to track current version in DB
+        st.session_state.index_version_in_db = hash_value
+        
+        return True
+    except Exception as e:
+        st.error(f"Error saving index to MongoDB: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
+        return False
+
+# Function to load index from MongoDB
+def load_index_from_mongodb():
+    """Load the index from MongoDB if available"""
+    try:
+        # Check if there's an index stored
+        index_doc = st.session_state.index_collection.find_one({})
+        if not index_doc or "gridfs_id" not in index_doc:
+            return None, None
+        
+        # Retrieve from GridFS
+        grid_out = st.session_state.fs.get(index_doc["gridfs_id"])
+        index_bytes = grid_out.read()
+        
+        # Deserialize the index
+        try:
+            index = pickle.loads(index_bytes)
+            st.session_state.index_loaded_from_db = True
+            return index, index_doc["hash"]
+        except Exception as e:
+            st.warning(f"Error deserializing index: {str(e)}")
+            return None, None
+        
+    except Exception as e:
+        st.warning(f"Error loading index from MongoDB: {str(e)}")
+        return None, None    
 
 # Main Streamlit application
 def main():
@@ -1378,15 +1456,33 @@ def main():
                 st.session_state.index_hash = ""  # Force reindex
                 st.session_state.should_rerun = True
         
+        # Initialize tracking variables if they don't exist
+        if "index_version_in_db" not in st.session_state:
+            st.session_state.index_version_in_db = ""
+        if "index_loaded_from_db" not in st.session_state:
+            st.session_state.index_loaded_from_db = False
+
         # Current sources hash
         current_hash = get_sources_hash()
-        
+
         # Check if reindexing is needed
         need_reindex = False
-        
-        # Track if sources have changed
-        if current_hash != st.session_state.index_hash:
+
+        # If index is None, try to load from MongoDB first
+        if st.session_state.index is None:
+            loaded_index, loaded_hash = load_index_from_mongodb()
+            if loaded_index is not None and loaded_hash == current_hash:
+                st.session_state.index = loaded_index
+                st.session_state.index_hash = loaded_hash
+                st.success("Index loaded from database successfully")
+            else:
+                need_reindex = True
+        # Otherwise check if sources have changed
+        elif current_hash != st.session_state.index_hash:
             need_reindex = True
+
+        # Only update the index hash if we're going to reindex
+        if need_reindex:
             st.session_state.index_hash = current_hash
         
         # Show indexing status with st.spinner
@@ -1403,11 +1499,16 @@ def main():
             st.write(f"Knowledge base: {pdf_count} PDFs and {url_count} URLs")
         
         # Load and index documents if needed
-        if need_reindex or st.session_state.index is None:
+        if need_reindex:
             with indexing_placeholder.container():
                 with st.spinner("Reindexing knowledge base..."):
                     st.session_state.index = load_and_index_documents()
                     st.session_state.last_update_time = time.time()
+                    
+                    # Save the new index to MongoDB
+                    if st.session_state.index is not None:
+                        if save_index_to_mongodb(st.session_state.index, current_hash):
+                            st.success("Index saved to database")
                         
         # Create query engine if index exists
         if st.session_state.index is not None:
@@ -1436,4 +1537,4 @@ if __name__ == "__main__":
     except Exception as e:
         import traceback
         st.error(f"An unexpected error occurred: {str(e)}")
-        st.error(traceback.format_exc())            
+        st.error(traceback.format_exc())
