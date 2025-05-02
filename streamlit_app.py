@@ -718,26 +718,43 @@ def update_index_with_document(index, document):
         st.error(f"Error updating index: {str(e)}")
         return index
 
-# Updated handle_file_upload function with local storage functionality removed
+# Updated handle_file_upload function with duplicate handling
 def handle_file_upload(uploaded_file):
     if uploaded_file is not None:
         try:
-            # Check for duplicate before processing
+            # Get file content for hash calculation
+            file_content = uploaded_file.getbuffer()
+            
+            # Calculate hash BEFORE any processing or compression
+            original_content_hash = hashlib.md5(file_content).hexdigest()
+            
             # 1. First check by filename
             if uploaded_file.name in st.session_state.uploaded_files:
                 st.warning(f"File with name '{uploaded_file.name}' already exists. Skipping upload.")
                 return False
                 
             # 2. Check by content hash for duplicate detection even if filename is different
-            file_content = uploaded_file.getbuffer()
-            content_hash = hashlib.md5(file_content).hexdigest()
+            existing_file = st.session_state.files_collection.find_one({
+                "$or": [
+                    {"original_content_hash": original_content_hash},  # Check hash before compression
+                    {"content_hash": original_content_hash}            # Also check if it matches a compressed hash
+                ]
+            })
             
-            # Check if this hash exists in any file metadata
-            if hasattr(st.session_state, "files_collection"):
-                existing_file = st.session_state.files_collection.find_one({"content_hash": content_hash})
-                if existing_file:
-                    st.warning(f"This file appears to be a duplicate of '{existing_file['filename']}'. Skipping upload.")
-                    return False
+            if existing_file:
+                st.warning(f"This file appears to be a duplicate of '{existing_file['filename']}' that already exists in the database.")
+                return False
+            
+            # File is not a duplicate, proceed with compression
+            compressed_content = compress_pdf(file_content)
+            
+            # Calculate hash AFTER compression
+            content_hash = hashlib.md5(compressed_content).hexdigest()
+            
+            # Calculate compression stats
+            original_size = len(file_content)
+            compressed_size = len(compressed_content)
+            compression_ratio = (original_size - compressed_size) / original_size * 100 if original_size > 0 else 0
             
             # MongoDB part - try with increased timeout and retry
             max_retries = 3
@@ -760,30 +777,39 @@ def handle_file_upload(uploaded_file):
                     fs = gridfs.GridFS(db)
                     files_collection = db["files"]
                     
-                    # Save to GridFS directly using bytes
+                    # Get standardized filename for consistency with other upload methods
+                    standardized_filename = get_standardized_filename(uploaded_file.name, file_content)
+                    
+                    # Save to GridFS directly using compressed bytes
                     file_id = fs.put(
-                        file_content,
-                        filename=uploaded_file.name,
+                        compressed_content,
+                        filename=standardized_filename,
                         content_type=uploaded_file.type,
+                        original_filename=uploaded_file.name,
                         chunkSize=1048576  # Use 1MB chunks to reduce timeouts
                     )
                     
-                    # Save file metadata with content hash for deduplication
+                    # Save file metadata with both content hashes for deduplication
                     files_collection.insert_one({
-                        "filename": uploaded_file.name,
+                        "filename": standardized_filename,
+                        "original_filename": uploaded_file.name,
                         "gridfs_id": file_id,
-                        "size": len(file_content),
-                        "content_hash": content_hash,  # Add hash for deduplication
+                        "size": compressed_size,
+                        "original_size": original_size,
+                        "compression_ratio": compression_ratio,
+                        "original_content_hash": original_content_hash,  # Hash BEFORE compression
+                        "content_hash": content_hash,                    # Hash AFTER compression
+                        "source": "direct_upload",
                         "last_modified": time.time()
                     })
                     
                     success = True
                     
                     # Update the session state list
-                    if uploaded_file.name not in st.session_state.uploaded_files:
-                        st.session_state.uploaded_files.append(uploaded_file.name)
+                    if standardized_filename not in st.session_state.uploaded_files:
+                        st.session_state.uploaded_files.append(standardized_filename)
                     
-                    st.session_state.upload_success_message = f"Uploaded: {uploaded_file.name}"
+                    st.session_state.upload_success_message = f"Uploaded: {uploaded_file.name} → {standardized_filename}"
                     
                     # Force a reset of the index to include the new file
                     st.session_state.index_hash = ""
