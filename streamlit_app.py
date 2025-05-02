@@ -112,15 +112,21 @@ def collaborator_upload_page():
         st.session_state.collaborator_upload_success = None
     if "collaborator_upload_error" not in st.session_state:
         st.session_state.collaborator_upload_error = None
+    if "submission_in_progress" not in st.session_state:
+        st.session_state.submission_in_progress = False
     
     # Display any previous messages
     if st.session_state.collaborator_upload_success:
         st.success(st.session_state.collaborator_upload_success)
         st.session_state.collaborator_upload_success = None
+        # Reset submission status after success message is shown
+        st.session_state.submission_in_progress = False
     
     if st.session_state.collaborator_upload_error:
         st.error(st.session_state.collaborator_upload_error)
         st.session_state.collaborator_upload_error = None
+        # Reset submission status after error message is shown
+        st.session_state.submission_in_progress = False
     
     uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
     
@@ -135,8 +141,14 @@ def collaborator_upload_page():
         for key, value in file_details.items():
             st.write(f"- **{key}:** {value}")
         
-        # Upload button with a dedicated action
-        if st.button("Submit for Review", key="submit_for_review_btn"):
+        # Upload button with a dedicated action - disable if submission is in progress
+        button_disabled = st.session_state.submission_in_progress
+        button_text = "Processing..." if button_disabled else "Submit for Review" 
+        
+        if st.button(button_text, key="submit_for_review_btn", disabled=button_disabled):
+            # Set submission in progress flag
+            st.session_state.submission_in_progress = True
+            
             # Generate a unique ID for the upload
             upload_id = str(uuid.uuid4())
             
@@ -150,18 +162,35 @@ def collaborator_upload_page():
                 if "pending_uploads" not in temp_db.list_collection_names():
                     temp_db.create_collection("pending_uploads")
                 
+                # Check if this file has already been submitted (by content hash)
+                file_content = uploaded_file.getvalue()
+                content_hash = hashlib.md5(file_content).hexdigest()
+                
+                # Look for existing submission with the same content
+                existing_submission = temp_db.pending_uploads.find_one({
+                    "content_hash": content_hash,
+                    "status": "pending"  # Only check pending submissions
+                })
+                
+                if existing_submission:
+                    st.session_state.collaborator_upload_error = "This file has already been submitted for review."
+                    st.session_state.submission_in_progress = False
+                    st.rerun()
+                    return
+                
                 # Prepare metadata for temporary storage
                 temp_upload_metadata = {
                     "_id": upload_id,
                     "filename": uploaded_file.name,
                     "upload_timestamp": datetime.now(),
                     "status": "pending",
-                    "original_size": uploaded_file.size
+                    "original_size": uploaded_file.size,
+                    "content_hash": content_hash  # Store hash for deduplication
                 }
                 
                 # Store file in GridFS
                 file_id = temp_fs.put(
-                    uploaded_file.getvalue(), 
+                    file_content, 
                     filename=uploaded_file.name,
                     metadata=temp_upload_metadata
                 )
@@ -169,7 +198,8 @@ def collaborator_upload_page():
                 # Store metadata separately
                 temp_db.pending_uploads.insert_one({
                     **temp_upload_metadata,
-                    "gridfs_id": file_id
+                    "gridfs_id": file_id,
+                    "content_hash": content_hash  # Store hash in metadata too
                 })
                 
                 # Set success message
@@ -178,6 +208,7 @@ def collaborator_upload_page():
                 
             except Exception as e:
                 st.session_state.collaborator_upload_error = f"Error uploading file: {str(e)}"
+                st.session_state.submission_in_progress = False
                 st.rerun()
     
     # Add some info text
