@@ -2600,13 +2600,39 @@ def main():
                     if search_query.lower() in pdf.lower()
                 ]
                 
-                # Display PDF list with delete buttons
+                # Display PDF list with direct download and delete buttons
                 for i, pdf in enumerate(filtered_pdfs):
-                    col1, col2 = st.columns([3, 1])
+                    col1, col2, col3 = st.columns([3, 0.8, 0.8])  # Adjust column widths
                     col1.write(pdf)
-                    # Use a unique key by adding an index to prevent duplicates
+                    
+                    # Create unique keys for each button
                     safe_pdf = pdf.replace(".", "_").replace(" ", "_").replace("-", "_")
-                    if col2.button("🗑️", key=f"delete_{i}_{safe_pdf[:20]}", help="Delete this PDF"):
+                    
+                    # Get file data in advance (before button click)
+                    try:
+                        # Get file from GridFS
+                        file_doc = st.session_state.files_collection.find_one({"filename": pdf})
+                        if file_doc and "gridfs_id" in file_doc:
+                            # Direct download button
+                            file_data = st.session_state.fs.get(file_doc["gridfs_id"]).read()
+                            col2.download_button(
+                                label="📥",
+                                data=file_data,
+                                file_name=pdf,
+                                mime="application/pdf",
+                                key=f"download_{i}_{safe_pdf[:20]}",
+                                help="Download this PDF"
+                            )
+                        else:
+                            # Display disabled button if file not found
+                            col2.button("📥", key=f"download_missing_{i}_{safe_pdf[:20]}", disabled=True)
+                    except Exception as e:
+                        # Display disabled button on error
+                        col2.button("📥", key=f"download_error_{i}_{safe_pdf[:20]}", disabled=True)
+                        st.error(f"Error preparing file: {str(e)}")
+                    
+                    # Delete button
+                    if col3.button("🗑️", key=f"delete_{i}_{safe_pdf[:20]}", help="Delete this PDF"):
                         set_delete_confirmation(pdf)
                 
                 # Show message if no PDFs match the search
