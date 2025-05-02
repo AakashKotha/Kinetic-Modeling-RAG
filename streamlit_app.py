@@ -42,8 +42,11 @@ from datetime import datetime, timedelta
 
 # Add these constants to your existing constants
 GOOGLE_DRIVE_FOLDER_ID = "1w-6V_XZvNK6gOeFT61KZk1GLHg65brKR"  # Your Google Drive folder ID
-SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
-
+GOOGLE_SPREADSHEET_ID = "1tHUpcmqGza9ChAfpj1twnkMSitMhdRohQta2BNGDN74"  # Your Google Spreadsheet ID
+SCOPES = [
+    'https://www.googleapis.com/auth/drive.readonly',
+    'https://www.googleapis.com/auth/spreadsheets.readonly'
+]
 # Load environment variables
 load_dotenv()
 
@@ -89,6 +92,8 @@ SESSION_KEYS = [
     "upload_preview_id",            # ID of upload being previewed
     "upload_action_error",          # Error during upload approval/denial actions
     "upload_action_success",        # Success message for upload actions
+    "spreadsheet_url_success",      # Success message for spreadsheet URL import
+    "spreadsheet_url_error",        # Error message for spreadsheet URL import
 ]
 
 
@@ -700,13 +705,33 @@ def extract_text_from_url(url):
         st.error(f"Error extracting text from URL {url}: {str(e)}")
         return None
 
-# Function to save URLs to MongoDB
-def save_urls(urls):
+# Update the save_urls function to maintain metadata
+def update_save_urls(urls):
+    """
+    Updated function to save URLs to MongoDB while preserving metadata.
+    Use this instead of the original save_urls function.
+    """
     try:
-        # Clear existing URLs and add new ones
-        st.session_state.urls_collection.delete_many({})
+        # Get current URLs with their metadata
+        current_urls_docs = list(st.session_state.urls_collection.find({}))
+        current_urls_dict = {doc["url"]: doc for doc in current_urls_docs}
+        
+        # Find URLs to remove (in database but not in new list)
+        urls_to_remove = [doc["url"] for doc in current_urls_docs if doc["url"] not in urls]
+        
+        # Remove URLs that are no longer in the list
+        if urls_to_remove:
+            st.session_state.urls_collection.delete_many({"url": {"$in": urls_to_remove}})
+        
+        # Add new URLs (in new list but not in database)
         for url in urls:
-            st.session_state.urls_collection.insert_one({"url": url})
+            if url not in current_urls_dict:
+                st.session_state.urls_collection.insert_one({
+                    "url": url,
+                    "source": "manual_addition",
+                    "import_date": datetime.now()
+                })
+                
     except Exception as e:
         st.error(f"Error saving URLs to MongoDB: {str(e)}")
 
@@ -723,7 +748,7 @@ def add_url():
         return False
     
     st.session_state.urls.append(url)
-    save_urls(st.session_state.urls)
+    update_save_urls(st.session_state.urls)
     st.session_state.url_delete_success_message = f"Added URL: {url}"
     
     # Don't try to reset url_input directly, use a flag instead
@@ -1033,7 +1058,7 @@ def confirm_delete_url():
             if url in st.session_state.urls:
                 st.session_state.urls.remove(url)
                 # Save updated URLs to MongoDB
-                save_urls(st.session_state.urls)
+                update_save_urls(st.session_state.urls)
                 st.session_state.index_hash = ""
                 st.session_state.url_delete_success_message = f"Removed URL: {url}"
             else:
@@ -2511,6 +2536,386 @@ def google_drive_tab():
                     with st.expander("Error Details"):
                         st.code(import_results['error_details'])
 
+# Function to authenticate with Google Sheets API
+def authenticate_google_sheets():
+    """Authenticate with Google Sheets API using the same credentials as Google Drive."""
+    creds = None
+    # The file token.json stores the user's access and refresh tokens
+    if os.path.exists('token.json'):
+        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    
+    # If credentials don't exist or are invalid, authenticate
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                'credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        # Save the credentials for the next run
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
+    
+    return creds
+
+# Modified function to extract URLs from column D instead of column C
+def fetch_urls_from_spreadsheet(spreadsheet_id):
+    """Extract URLs from column D (index 3) of the spreadsheet."""
+    try:
+        # Authenticate with Google Sheets API
+        creds = authenticate_google_sheets()
+        service = build('sheets', 'v4', credentials=creds)
+        
+        # First, get the available sheet names
+        sheet_metadata = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+        sheets = sheet_metadata.get('sheets', '')
+        
+        if not sheets:
+            return {'success': False, 'message': 'No sheets found in the spreadsheet.', 'urls': []}
+        
+        # Get the first sheet's name
+        first_sheet_name = sheets[0].get('properties', {}).get('title', 'Sheet1')
+        
+        # Get all data from the sheet - include column D (up to index 3)
+        range_name = f"'{first_sheet_name}'!A:D"  # Include column D
+        
+        # Call the Sheets API
+        sheet = service.spreadsheets()
+        result = sheet.values().get(spreadsheetId=spreadsheet_id, range=range_name).execute()
+        values = result.get('values', [])
+        
+        if not values:
+            return {'success': False, 'message': 'No data found in spreadsheet.', 'urls': []}
+        
+        # Print debug information
+        st.write(f"Debug: Found {len(values)} rows in spreadsheet '{first_sheet_name}'")
+        
+        # Extract URLs from column D (index 3)
+        urls = []
+        for i, row in enumerate(values):
+            # Check if row has a column D
+            if len(row) > 3 and row[3]:  # Changed from index 2 to 3 for column D
+                cell_value = row[3].strip()  # Changed from index 2 to 3
+                
+                # Check if the cell looks like a URL (starts with http)
+                if cell_value.startswith('http'):
+                    # Get title from column B (index 1) if available, otherwise use a default
+                    title = row[1].strip() if len(row) > 1 and row[1] else f"Resource {i+1}"
+                    
+                    # Add debug print
+                    st.write(f"Debug: Found URL in row {i+1}: {cell_value[:30]}...")
+                    
+                    urls.append({
+                        'url': cell_value,
+                        'title': title,
+                        'row': i+1
+                    })
+        
+        if not urls:
+            # Print sample data for debugging
+            sample_data = "Sample data from spreadsheet:\n"
+            for i, row in enumerate(values[:5]):
+                row_data = row if len(row) > 0 else "Empty row"
+                sample_data += f"Row {i+1}: {row_data}\n"
+            
+            return {
+                'success': False,
+                'message': f'No URLs found in column D. Please ensure URLs are in the fourth column and start with "http".',
+                'debug_info': sample_data,
+                'urls': []
+            }
+        
+        return {
+            'success': True,
+            'message': f'Found {len(urls)} URLs in spreadsheet (from sheet "{first_sheet_name}").',
+            'total_data_rows': len(values),
+            'urls': urls
+        }
+    
+    except Exception as e:
+        import traceback
+        error_traceback = traceback.format_exc()
+        
+        error_message = f"Error fetching URLs from spreadsheet: {str(e)}"
+        return {
+            'success': False,
+            'message': error_message,
+            'error_details': error_traceback,
+            'urls': []
+        }
+
+# Simplified function to import URLs
+def import_urls_from_spreadsheet():
+    """Import URLs from spreadsheet with simplified processing."""
+    try:
+        # Show progress indicators
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        status_text.text("Connecting to Google Sheets...")
+        progress_bar.progress(10)
+        
+        # Fetch URLs
+        fetch_result = fetch_urls_from_spreadsheet(GOOGLE_SPREADSHEET_ID)
+        
+        progress_bar.progress(30)
+        
+        if not fetch_result['success']:
+            progress_bar.empty()
+            status_text.empty()
+            
+            # If debug info available, show it
+            if 'debug_info' in fetch_result:
+                st.write(fetch_result['debug_info'])
+                
+            return fetch_result
+        
+        urls_found = fetch_result['urls']
+        total_found = len(urls_found)
+        
+        if total_found == 0:
+            progress_bar.empty()
+            status_text.empty()
+            return {
+                'success': True,
+                'message': 'No URLs found in the spreadsheet.',
+                'total_urls_found': 0,
+                'added_urls': 0,
+                'urls': []
+            }
+        
+        status_text.text(f"Found {total_found} URLs. Processing...")
+        progress_bar.progress(40)
+        
+        # Get current URLs
+        current_urls = list(st.session_state.urls)
+        
+        # Process results
+        results = {
+            'success': True,
+            'total_urls_found': total_found,
+            'added_urls': 0,
+            'duplicate_urls': 0,
+            'invalid_urls': 0,
+            'urls': []
+        }
+        
+        # Process each URL
+        for i, url_info in enumerate(urls_found):
+            # Update progress
+            progress = 40 + (i / total_found * 50)
+            progress_bar.progress(int(progress))
+            
+            url = url_info['url']
+            title = url_info['title']
+            row = url_info['row']
+            
+            status_text.text(f"Processing {i+1}/{total_found}: {title} (row {row})")
+            
+            # Validate URL
+            if not validators.url(url):
+                results['invalid_urls'] += 1
+                results['urls'].append({
+                    'url': url,
+                    'title': title,
+                    'row': row,
+                    'status': 'invalid',
+                    'message': 'Invalid URL format'
+                })
+                continue
+            
+            # Check for duplicates
+            if url in current_urls:
+                results['duplicate_urls'] += 1
+                results['urls'].append({
+                    'url': url,
+                    'title': title,
+                    'row': row,
+                    'status': 'duplicate',
+                    'message': 'URL already exists in database'
+                })
+                continue
+            
+            # Add URL to session state and list
+            st.session_state.urls.append(url)
+            current_urls.append(url)
+            
+            # Small delay for progress visibility
+            time.sleep(0.2)
+            
+            # Save to database
+            try:
+                st.session_state.urls_collection.insert_one({
+                    "url": url,
+                    "title": title,
+                    "source": "spreadsheet_import",
+                    "import_date": datetime.now(),
+                    "row": row
+                })
+                
+                results['added_urls'] += 1
+                results['urls'].append({
+                    'url': url,
+                    'title': title,
+                    'row': row,
+                    'status': 'added',
+                    'message': 'Successfully added'
+                })
+                
+            except Exception as e:
+                st.warning(f"Error saving URL to database: {str(e)}")
+                try:
+                    # Fallback to basic save
+                    st.session_state.urls_collection.insert_one({"url": url})
+                    
+                    results['added_urls'] += 1
+                    results['urls'].append({
+                        'url': url,
+                        'title': title,
+                        'row': row,
+                        'status': 'added',
+                        'message': 'Added with basic metadata'
+                    })
+                except:
+                    # If even basic save fails, record as error
+                    results['invalid_urls'] += 1
+                    results['urls'].append({
+                        'url': url,
+                        'title': title,
+                        'row': row,
+                        'status': 'error',
+                        'message': 'Database error'
+                    })
+        
+        # Finalize
+        progress_bar.progress(95)
+        status_text.text("Finalizing...")
+        
+        # Save URLs
+        update_save_urls(current_urls)
+        
+        # Force reindex if URLs were added
+        if results['added_urls'] > 0:
+            st.session_state.index_hash = ""
+        
+        # Complete progress
+        progress_bar.progress(100)
+        time.sleep(0.5)
+        
+        # Clear indicators
+        progress_bar.empty()
+        status_text.empty()
+        
+        # Set message
+        results['message'] = f"Successfully added {results['added_urls']} new URLs out of {total_found} found. {results['duplicate_urls']} duplicates skipped."
+        
+        return results
+        
+    except Exception as e:
+        # Clean up progress indicators
+        if 'progress_bar' in locals():
+            progress_bar.empty()
+        if 'status_text' in locals():
+            status_text.empty()
+            
+        import traceback
+        return {
+            'success': False,
+            'message': f"Error importing URLs: {str(e)}",
+            'error_details': traceback.format_exc()
+        }
+
+# Updated spreadsheet_url_tab function with automatic refresh
+def spreadsheet_url_tab():
+    """Tab in admin interface to import URLs from Google Spreadsheet with auto-refresh."""
+    st.write("## Import URLs from Google Spreadsheet")
+    
+    # Add info about the connected spreadsheet
+    st.info(f"Connected to Google Spreadsheet ID: {GOOGLE_SPREADSHEET_ID}")
+    
+    # Variable to track if import was successful and should trigger refresh
+    trigger_refresh = False
+    
+    # Add import button
+    if st.button("Import URLs from Spreadsheet", key="import_spreadsheet_urls"):
+        with st.spinner("Preparing to import URLs..."):
+            import_results = import_urls_from_spreadsheet()
+            
+            if import_results['success']:
+                # Different display based on what happened
+                if import_results['added_urls'] > 0:
+                    st.success(f"Successfully added {import_results['added_urls']} new URLs. {import_results['duplicate_urls']} duplicates skipped.")
+                    
+                    # Display statistics
+                    st.write("### Import Statistics")
+                    
+                    # Use columns for the stats display
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        st.metric("Total Rows Processed", import_results.get('total_data_rows', import_results['total_urls_found']))
+                    with col2:
+                        st.metric("Valid URLs Found", import_results['total_urls_found'])
+                    with col3:
+                        st.metric("New URLs Added", import_results['added_urls'])
+                    with col4:
+                        total_skipped = import_results['duplicate_urls'] + import_results['invalid_urls']
+                        st.metric("Skipped", total_skipped, 
+                                 help=f"Duplicates: {import_results['duplicate_urls']}, Invalid: {import_results['invalid_urls']}")
+                    
+                    # Show processed URLs in expandable sections
+                    with st.expander("View Processed URLs"):
+                        # First show successfully added URLs
+                        st.write("#### Successfully Added:")
+                        success_count = 0
+                        for url_info in import_results['urls']:
+                            if url_info['status'] == 'added':
+                                success_count += 1
+                                st.write(f"✅ **{url_info['title']}** (Row {url_info['row']}): [{url_info['url']}]({url_info['url']})")
+                        
+                        if success_count == 0:
+                            st.write("No URLs were successfully added.")
+                        
+                        # Then show skipped URLs due to duplicates
+                        if import_results['duplicate_urls'] > 0:
+                            st.write("#### Skipped (Already Exist):")
+                            for url_info in import_results['urls']:
+                                if url_info['status'] == 'duplicate':
+                                    st.write(f"⏭️ **{url_info['title']}** (Row {url_info['row']}): {url_info['url']}")
+                            
+                        # Finally show invalid URLs
+                        if import_results['invalid_urls'] > 0:
+                            st.write("#### Invalid URLs:")
+                            for url_info in import_results['urls']:
+                                if url_info['status'] == 'invalid':
+                                    st.write(f"❌ **{url_info['title']}** (Row {url_info['row']}): {url_info['url']}")
+                    
+                    # Set the trigger_refresh flag to True
+                    trigger_refresh = True
+                else:
+                    # No new URLs were added
+                    st.info(import_results['message'])
+            else:
+                st.error(import_results['message'])
+                if 'error_details' in import_results:
+                    with st.expander("Error Details"):
+                        st.code(import_results['error_details'])
+    
+    # Automatic refresh logic - must be at the end of the function
+    # Use a container for the refresh message
+    refresh_container = st.empty()
+    
+    # Check if we should trigger a refresh
+    if trigger_refresh:
+        # Show a brief message
+        refresh_container.info("Refreshing page to update URL list...")
+        
+        # Wait a short moment to ensure stats are visible
+        time.sleep(1.5)
+        
+        # Then rerun the app
+        st.rerun()
+
 # Main Streamlit application
 def main():
 
@@ -2568,7 +2973,15 @@ def main():
             st.sidebar.title("Knowledge Base Management")
             
             # Create tabs for PDF and URL management
-            tab1, tab2, tab3, tab4, tab5 = st.sidebar.tabs(["PDF Documents", "URLs", "Embeddings", "Google Drive", "Collaborator Uploads"])
+            tab1, tab2, tab3, tab4, tab5, tab6 = st.sidebar.tabs([
+                "PDF Documents",
+                "Google Drive",
+                "URLs", 
+                "Spreadsheet URLs", 
+                "Collaborator Uploads",
+                "Embeddings"
+            ])
+
             
             with tab1:
                 st.write("Upload a new PDF")
@@ -2683,6 +3096,9 @@ def main():
                     st.info("No PDFs uploaded yet")       
             
             with tab2:
+                google_drive_tab() 
+
+            with tab3:
                 # Add new URL
                 st.write("Add a new URL")
                 
@@ -2736,7 +3152,14 @@ def main():
                     if col2.button("🗑️", key=f"delete_url_{i}_{safe_url[:10]}", help="Remove this URL"):
                         set_delete_url_confirmation(url)
 
-            with tab3:
+            # Spreadsheet URLs
+            with tab4:
+                spreadsheet_url_tab()           
+
+            with tab5:
+                collaborator_uploads_review_tab()  
+
+            with tab6:
                 st.write("Export Embeddings for Manifold Comparison")
                 
                 # Display information about the current index
@@ -2852,12 +3275,7 @@ def main():
                                         """)
                 else:
                     st.warning("No index available. Please add documents and index them first.")   
-
-            with tab4:
-                google_drive_tab()    
-
-            with tab5:
-                collaborator_uploads_review_tab()                 
+                   
             
             # Force reindex button (outside tabs)
             if st.sidebar.button("⟳ Reindex All", key="force_reindex", help="Force reindex all documents and URLs"):
