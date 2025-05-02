@@ -17,6 +17,7 @@ from llama_index.core.postprocessor import SimilarityPostprocessor
 import pymongo
 import gridfs
 import hashlib
+import tempfile
 
 import base64
 import numpy as np
@@ -253,6 +254,7 @@ def show_pdf_preview_improved(upload, file_content):
             st.error(f"Error rendering PDF preview: {str(e)}")
             st.write("PDF preview rendering failed. Please use the download button to view the file.")
 
+# Also update the collaborator_uploads_review_tab function to handle rejection status
 def collaborator_uploads_review_tab():
     """Tab in admin interface to review collaborator uploads."""
     st.write("## Collaborator PDF Uploads")
@@ -269,15 +271,24 @@ def collaborator_uploads_review_tab():
         # Fetch pending uploads
         pending_uploads = list(temp_db.pending_uploads.find({"status": "pending"}))
         
-        # Get recently approved uploads within the last 30 seconds
+        # Get recently approved/rejected uploads within the last 30 seconds
         thirty_seconds_ago = datetime.now() - timedelta(seconds=30)
+        
+        # Get approved uploads
         recently_approved_uploads = list(temp_db.pending_uploads.find({
             "status": "approved", 
             "approved_at": {"$gt": thirty_seconds_ago}
         }))
         
-        # If no pending uploads and no recent approvals, show info
-        if not pending_uploads and not recently_approved_uploads:
+        # Get rejected uploads (due to duplicates)
+        recently_rejected_uploads = list(temp_db.pending_uploads.find({
+            "status": "rejected", 
+            "rejected_at": {"$gt": thirty_seconds_ago},
+            "rejection_reason": {"$in": ["duplicate_content", "duplicate_filename"]}
+        }))
+        
+        # If no pending uploads and no recent approvals/rejections, show info
+        if not pending_uploads and not recently_approved_uploads and not recently_rejected_uploads:
             st.info("No pending uploads to review")
             return
         
@@ -288,13 +299,29 @@ def collaborator_uploads_review_tab():
         # Show recently approved uploads first with success message
         for upload in recently_approved_uploads:
             with st.container():
-                # Show a success message with nice styling
+                # Show a success message for normal approval
                 st.markdown(f"""
                 <div style="padding: 10px; background-color: rgba(0, 200, 0, 0.1); border-left: 5px solid #00c000; margin-bottom: 15px;">
                     <h4 style="margin-top: 0; color: #00c000;">✅ Successfully Approved</h4>
                     <p><b>Original:</b> {upload['filename']}</p>
                     <p><b>Renamed to:</b> {upload.get('standardized_filename', 'Unknown')}</p>
-                    <p><i>This file has been added to the main database.</i></p>
+                    <p><i>This file has been added to the database.</i></p>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        # Show recently rejected uploads with error message
+        for upload in recently_rejected_uploads:
+            with st.container():
+                duplicate_of = upload.get('duplicate_of', 'an existing file')
+                reason = "content is identical to" if upload.get('rejection_reason') == 'duplicate_content' else "has the same standardized name as"
+                
+                # Show a rejection message
+                st.markdown(f"""
+                <div style="padding: 10px; background-color: rgba(255, 0, 0, 0.1); border-left: 5px solid #ff0000; margin-bottom: 15px;">
+                    <h4 style="margin-top: 0; color: #ff0000;">❌ Upload Rejected - Duplicate File</h4>
+                    <p><b>Original:</b> {upload['filename']}</p>
+                    <p><b>Reason:</b> This file {reason} '{duplicate_of}'</p>
+                    <p><i>The file was not added to the database to prevent duplication.</i></p>
                 </div>
                 """, unsafe_allow_html=True)
         
@@ -373,12 +400,24 @@ def collaborator_uploads_review_tab():
                         if st.button("✓ Yes, Approve", key=f"confirm_approve_{upload['_id']}", use_container_width=True):
                             with st.spinner(f"Processing '{upload['filename']}'..."):
                                 # Process the approval
-                                standardized_filename = process_approval_with_feedback(upload, temp_db)
-                                
-                                if standardized_filename:
-                                    # Clear the confirmation state
-                                    st.session_state.confirm_approve_id = None
-                                    st.rerun()
+                                try:
+                                    standardized_filename = process_approval_with_feedback(upload, temp_db)
+                                    
+                                    if standardized_filename:
+                                        # Clear the confirmation state
+                                        st.session_state.confirm_approve_id = None
+                                        st.rerun()
+                                    else:
+                                        # If returned None, it means the file was rejected as a duplicate
+                                        # Clear the confirmation state and rerun to show the rejection message
+                                        st.session_state.confirm_approve_id = None
+                                        st.rerun()
+                                except Exception as e:
+                                    # Display MongoDB connection error
+                                    st.error(f"Error uploading to database: {str(e)}")
+                                    # Show specific error for SSL/connection issues
+                                    if "SSL" in str(e) or "connect" in str(e).lower():
+                                        st.error("Database connection error. Please try again later.")
                     
                     with confirm_cols[1]:
                         if st.button("✗ Cancel", key=f"cancel_approve_{upload['_id']}", use_container_width=True):
@@ -410,86 +449,6 @@ def collaborator_uploads_review_tab():
         st.error(f"Error loading collaborator uploads: {str(e)}")
         import traceback
         st.error(traceback.format_exc())
-
-
-def process_approval_with_feedback(upload, temp_db):
-    """Process the approval of a collaborator upload and return the standardized filename."""
-    try:
-        # Connect to main database
-        mongo_client = pymongo.MongoClient(os.getenv("MONGO_URI"))
-        main_db = mongo_client["rag_system"]
-        
-        # Get GridFS instances
-        temp_fs = gridfs.GridFS(temp_db)
-        main_fs = gridfs.GridFS(main_db)
-        
-        # Get file content
-        file_content = temp_fs.get(upload['gridfs_id']).read()
-        
-        # Process the file (standardize name, compress)
-        standardized_filename = get_standardized_filename(
-            upload['filename'], 
-            file_content
-        )
-        
-        # Compress the PDF
-        compressed_content = compress_pdf(file_content)
-        
-        # Calculate compression stats
-        original_size = len(file_content)
-        compressed_size = len(compressed_content)
-        compression_ratio = ((original_size - compressed_size) / original_size) * 100 if original_size > 0 else 0
-        
-        # Save to main GridFS
-        main_file_id = main_fs.put(
-            compressed_content,
-            filename=standardized_filename,
-            content_type='application/pdf',
-            original_filename=upload['filename']
-        )
-        
-        # Save metadata to main files collection
-        main_db.files.insert_one({
-            "filename": standardized_filename,
-            "original_filename": upload['filename'],
-            "gridfs_id": main_file_id,
-            "size": compressed_size,
-            "original_size": original_size,
-            "compression_ratio": compression_ratio,
-            "source": "collaborator_upload",
-            "upload_id": upload['_id'],
-            "last_modified": time.time()
-        })
-        
-        # Also save to local temp directory for immediate access
-        temp_file_path = os.path.join(st.session_state.data_dir, standardized_filename)
-        with open(temp_file_path, "wb") as f:
-            f.write(compressed_content)
-        
-        # Update the session state list of files
-        if standardized_filename not in st.session_state.uploaded_files:
-            st.session_state.uploaded_files.append(standardized_filename)
-        
-        # Force a reset of the index to include the new file
-        st.session_state.index_hash = ""
-        
-        # Store the rename info for feedback with timestamp
-        temp_db.pending_uploads.update_one(
-            {"_id": upload['_id']},
-            {"$set": {
-                "status": "approved",
-                "approved_at": datetime.now(),  # Exact timestamp
-                "standardized_filename": standardized_filename
-            }}
-        )
-        
-        return standardized_filename
-        
-    except Exception as e:
-        st.error(f"Error approving upload: {str(e)}")
-        import traceback
-        st.error(traceback.format_exc())
-        return None
 
 # Process denial function (same as before)
 def process_denial(upload, temp_db):
@@ -594,6 +553,8 @@ def initialize_session_state():
         st.session_state.upload_preview_id = None
         st.session_state.upload_action_error = None
         st.session_state.upload_action_success = None
+        # Add flag for MongoDB error handling
+        st.session_state.skip_mongodb_save = False
         
         # Initialize other keys from previous implementation
         st.session_state.data_dir = "temp_data"
@@ -757,23 +718,26 @@ def update_index_with_document(index, document):
         st.error(f"Error updating index: {str(e)}")
         return index
 
-# Function to handle file upload with better MongoDB connectivity
+# Updated handle_file_upload function with local storage functionality removed
 def handle_file_upload(uploaded_file):
     if uploaded_file is not None:
         try:
-            # Create temp directory if it doesn't exist
-            if not os.path.exists(st.session_state.data_dir):
-                os.makedirs(st.session_state.data_dir)
+            # Check for duplicate before processing
+            # 1. First check by filename
+            if uploaded_file.name in st.session_state.uploaded_files:
+                st.warning(f"File with name '{uploaded_file.name}' already exists. Skipping upload.")
+                return False
+                
+            # 2. Check by content hash for duplicate detection even if filename is different
+            file_content = uploaded_file.getbuffer()
+            content_hash = hashlib.md5(file_content).hexdigest()
             
-            # First save to temporary file (local storage as backup)
-            temp_file_path = os.path.join(st.session_state.data_dir, uploaded_file.name)
-            with open(temp_file_path, "wb") as f:
-                bytes_data = uploaded_file.getbuffer()
-                f.write(bytes_data)
-            
-            # Track the file locally even if MongoDB fails
-            if uploaded_file.name not in st.session_state.uploaded_files:
-                st.session_state.uploaded_files.append(uploaded_file.name)
+            # Check if this hash exists in any file metadata
+            if hasattr(st.session_state, "files_collection"):
+                existing_file = st.session_state.files_collection.find_one({"content_hash": content_hash})
+                if existing_file:
+                    st.warning(f"This file appears to be a duplicate of '{existing_file['filename']}'. Skipping upload.")
+                    return False
             
             # MongoDB part - try with increased timeout and retry
             max_retries = 3
@@ -796,48 +760,43 @@ def handle_file_upload(uploaded_file):
                     fs = gridfs.GridFS(db)
                     files_collection = db["files"]
                     
-                    # Re-read file from disk to avoid potential buffer issues
-                    with open(temp_file_path, "rb") as f:
-                        file_content = f.read()
-                        
-                        # Save to GridFS directly using bytes
-                        file_id = fs.put(
-                            file_content,
-                            filename=uploaded_file.name,
-                            content_type=uploaded_file.type,
-                            chunkSize=1048576  # Use 1MB chunks to reduce timeouts
-                        )
+                    # Save to GridFS directly using bytes
+                    file_id = fs.put(
+                        file_content,
+                        filename=uploaded_file.name,
+                        content_type=uploaded_file.type,
+                        chunkSize=1048576  # Use 1MB chunks to reduce timeouts
+                    )
                     
-                    # Save file metadata
+                    # Save file metadata with content hash for deduplication
                     files_collection.insert_one({
                         "filename": uploaded_file.name,
                         "gridfs_id": file_id,
                         "size": len(file_content),
+                        "content_hash": content_hash,  # Add hash for deduplication
                         "last_modified": time.time()
                     })
                     
                     success = True
+                    
+                    # Update the session state list
+                    if uploaded_file.name not in st.session_state.uploaded_files:
+                        st.session_state.uploaded_files.append(uploaded_file.name)
+                    
                     st.session_state.upload_success_message = f"Uploaded: {uploaded_file.name}"
                     
-                    # Try to incrementally update the index if it exists
-                    if st.session_state.index is not None:
-                        try:
-                            reader = SimpleDirectoryReader(input_files=[temp_file_path])
-                            new_doc = reader.load_data()[0]
-                            st.session_state.index = update_index_with_document(st.session_state.index, new_doc)
-                            st.session_state.last_update_time = time.time()
-                        except Exception:
-                            # Fall back to full reindex if incremental update fails
-                            st.session_state.index_hash = ""
-                    else:
-                        st.session_state.index_hash = ""
+                    # Force a reset of the index to include the new file
+                    st.session_state.index_hash = ""
+                    
+                    # Close the MongoDB connection
+                    mongo_client.close()
                     
                 except Exception as e:
                     retry_count += 1
+                    
                     if retry_count >= max_retries:
-                        st.warning(f"MongoDB storage failed after {max_retries} attempts, but file is saved locally and will be used for indexing.")
-                        st.session_state.upload_success_message = f"Uploaded locally: {uploaded_file.name} (MongoDB backup failed)"
-                        st.session_state.index_hash = ""
+                        st.error(f"Error uploading to MongoDB after {max_retries} attempts. Upload failed.")
+                        success = False
                     else:
                         # Wait before retrying
                         time.sleep(1)
@@ -847,8 +806,11 @@ def handle_file_upload(uploaded_file):
                         mongo_client.close()
             
             # Set flag for rerun instead of direct call
-            st.session_state.should_rerun = True
-            return True
+            if success:
+                st.session_state.should_rerun = True
+                return True
+            else:
+                return False
             
         except Exception as e:
             st.error(f"Error uploading file: {str(e)}")
@@ -856,9 +818,7 @@ def handle_file_upload(uploaded_file):
             st.error(traceback.format_exc())
     return False
 
-# Main Application and Indexing Logic for RAG Query System
-
-# Function to load and index documents
+# Also modify the load_and_index_documents function to remove local file dependency
 def load_and_index_documents():
     try:
         # Create a sentence splitter for more natural chunks
@@ -873,39 +833,34 @@ def load_and_index_documents():
         Settings.node_parser = node_parser
         Settings.chunk_size = 512
         Settings.chunk_overlap = 50
-        
-        # Create temp data directory if it doesn't exist
-        if not os.path.exists(st.session_state.data_dir):
-            os.makedirs(st.session_state.data_dir)
             
         st.session_state.indexing_status = "in_progress"
         
         documents = []
         
-        # Ensure we have all files in the temp directory
+        # Directly load from MongoDB
         for filename in st.session_state.uploaded_files:
-            temp_file_path = os.path.join(st.session_state.data_dir, filename)
-            
-            # If file doesn't exist in temp dir, retrieve from GridFS
-            if not os.path.exists(temp_file_path):
-                try:
-                    file_doc = st.session_state.files_collection.find_one({"filename": filename})
-                    if file_doc and "gridfs_id" in file_doc:
-                        grid_out = st.session_state.fs.get(file_doc["gridfs_id"])
-                        with open(temp_file_path, "wb") as f:
-                            f.write(grid_out.read())
-                except Exception as e:
-                    st.warning(f"Error retrieving {filename}: {str(e)}")
-        
-        # Load PDF documents from temp directory
-        pdf_files = [f for f in os.listdir(st.session_state.data_dir) if f.endswith(".pdf")]
-        if pdf_files:
             try:
-                reader = SimpleDirectoryReader(st.session_state.data_dir)
-                pdf_documents = reader.load_data()
-                documents.extend(pdf_documents)
+                file_doc = st.session_state.files_collection.find_one({"filename": filename})
+                if file_doc and "gridfs_id" in file_doc:
+                    grid_out = st.session_state.fs.get(file_doc["gridfs_id"])
+                    
+                    # Create a temporary file for processing
+                    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temp_file:
+                        temp_file.write(grid_out.read())
+                        temp_file_path = temp_file.name
+                    
+                    try:
+                        # Process this file
+                        reader = SimpleDirectoryReader(input_files=[temp_file_path])
+                        pdf_documents = reader.load_data()
+                        documents.extend(pdf_documents)
+                    finally:
+                        # Clean up the temporary file
+                        if os.path.exists(temp_file_path):
+                            os.unlink(temp_file_path)
             except Exception as e:
-                st.error(f"Error reading PDF documents: {str(e)}")
+                st.warning(f"Error processing {filename}: {str(e)}")
         
         # Load URL content
         for url in st.session_state.urls:
@@ -1559,52 +1514,110 @@ def delete_all_pdfs():
         import traceback
         st.error(traceback.format_exc())
         return False
-    
-# Function to save index to MongoDB
+
+# Modify the save_index_to_mongodb function to handle connection errors better
 def save_index_to_mongodb(index, hash_value):
-    """Save the index to MongoDB for persistence"""
+    """Save the index to MongoDB for persistence with improved error handling"""
     try:
-        # Serialize the index to bytes
-        index_bytes = BytesIO()
-        pickle.dump(index, index_bytes)
-        index_bytes.seek(0)
+        # Check if we should skip DB save based on session state flag
+        if hasattr(st.session_state, "skip_mongodb_save") and st.session_state.skip_mongodb_save:
+            st.warning("Skipping MongoDB save due to previous errors. Index will be used locally only.")
+            return True
+            
+        # Check if index is too large - estimate size before attempting to save
+        try:
+            # Serialize to a temp buffer to estimate size
+            temp_buffer = BytesIO()
+            pickle.dump(index, temp_buffer)
+            estimated_size = len(temp_buffer.getvalue())
+            
+            # If over 15MB (MongoDB document limit is 16MB), don't attempt to save
+            if estimated_size > 15 * 1024 * 1024:
+                st.warning(f"Index is too large ({estimated_size / (1024*1024):.2f} MB) to save to MongoDB. Using locally only.")
+                st.session_state.skip_mongodb_save = True
+                return True
+        except Exception as size_error:
+            st.warning(f"Could not estimate index size: {str(size_error)}. Will attempt save anyway.")
         
-        # Save to GridFS
-        existing_index = st.session_state.index_collection.find_one({})
+        # Use increased timeouts for large uploads
+        mongo_client = pymongo.MongoClient(
+            os.getenv("MONGO_URI"),
+            serverSelectionTimeoutMS=30000,  # 30 seconds
+            connectTimeoutMS=30000,
+            socketTimeoutMS=60000,  # 60 seconds for large uploads
+            maxPoolSize=1,  # Limit connections during large uploads
+            retryWrites=True
+        )
+        
+        # Use a fresh GridFS instance with the new client
+        db = mongo_client["rag_system"]
+        fs = gridfs.GridFS(db)
+        index_collection = db["index"]
+        
+        # Serialize the index to bytes with a progress indicator
+        with st.spinner("Serializing index for database storage..."):
+            index_bytes = BytesIO()
+            pickle.dump(index, index_bytes)
+            index_bytes.seek(0)
+            data = index_bytes.getvalue()
+        
+        # Check if existing index exists
+        existing_index = index_collection.find_one({})
         if existing_index and "gridfs_id" in existing_index:
             try:
                 # Delete old index
-                st.session_state.fs.delete(existing_index["gridfs_id"])
+                fs.delete(existing_index["gridfs_id"])
             except Exception as e:
-                st.warning(f"Error deleting old index: {str(e)}")
+                st.warning(f"Could not delete old index: {str(e)}. Continuing with new save...")
         
-        # Store new index
-        index_id = st.session_state.fs.put(
-            index_bytes.getvalue(),
-            filename="vector_index",
-            content_type="application/octet-stream",
-            chunkSize=1048576  # 1MB chunks
-        )
-        
-        # Update or insert metadata document
-        st.session_state.index_collection.delete_many({})
-        st.session_state.index_collection.insert_one({
-            "gridfs_id": index_id,
-            "hash": hash_value,
-            "timestamp": time.time(),
-            "doc_count": len(st.session_state.uploaded_files),
-            "url_count": len(st.session_state.urls)
-        })
+        # Use chunked upload for large files to prevent timeouts
+        with st.spinner("Uploading index to MongoDB (this may take a while)..."):
+            chunk_size = 1048576  # 1MB
+            
+            # Store new index with larger chunk size
+            index_id = fs.put(
+                data,
+                filename="vector_index",
+                content_type="application/octet-stream",
+                chunkSize=chunk_size
+            )
+            
+            # Update or insert metadata document
+            index_collection.delete_many({})
+            index_collection.insert_one({
+                "gridfs_id": index_id,
+                "hash": hash_value,
+                "timestamp": time.time(),
+                "doc_count": len(st.session_state.uploaded_files),
+                "url_count": len(st.session_state.urls),
+                "size": len(data)
+            })
         
         # Update session state to track current version in DB
         st.session_state.index_version_in_db = hash_value
+        st.session_state.skip_mongodb_save = False  # Reset flag if successful
+        
+        # Close the temporary MongoDB connection
+        mongo_client.close()
         
         return True
+        
     except Exception as e:
         st.error(f"Error saving index to MongoDB: {str(e)}")
-        import traceback
-        st.error(traceback.format_exc())
-        return False
+        
+        # Add specific handling for connection errors
+        if "AutoReconnect" in str(type(e)) or "ConnectionAborted" in str(e) or "timeout" in str(e).lower():
+            st.warning("Connection timeout detected. Setting flag to avoid future MongoDB saves in this session.")
+            # Set a flag to avoid future attempts in this session
+            st.session_state.skip_mongodb_save = True
+            
+            # Still return True to continue with local processing
+            st.info("Index will be used locally but changes won't be saved to MongoDB in this session.")
+            return True
+        else:
+            import traceback
+            st.error(traceback.format_exc())
+            return False
 
 # Function to load index from MongoDB
 def load_index_from_mongodb():
@@ -1914,7 +1927,180 @@ def compress_pdf(pdf_content):
         # Return original content if compression fails
         return pdf_content
 
-# Function to download and process a PDF file from Google Drive
+# Updated is_duplicate_content function that works with both raw and compressed content
+def is_duplicate_content(file_content):
+    """
+    Check if file content already exists in the database by calculating and comparing hash.
+    Returns (is_duplicate, existing_filename) tuple.
+    """
+    # Calculate MD5 hash of the UNCOMPRESSED content
+    content_hash = hashlib.md5(file_content).hexdigest()
+    
+    # Also check if this might be a compressed version of an existing file
+    compressed_content = compress_pdf(file_content)
+    compressed_hash = hashlib.md5(compressed_content).hexdigest()
+    
+    # Check if either hash exists in database
+    existing_file = st.session_state.files_collection.find_one({
+        "$or": [
+            {"original_content_hash": content_hash},  # Hash before compression
+            {"content_hash": content_hash},           # Hash after compression from other method
+            {"original_content_hash": compressed_hash},
+            {"content_hash": compressed_hash}
+        ]
+    })
+    
+    if existing_file:
+        return True, existing_file.get("filename", "an existing file")
+    
+    return False, None
+
+# Update the process_approval_with_feedback function with consistent hash storage
+def process_approval_with_feedback(upload, temp_db):
+    """Process the approval of a collaborator upload and return the standardized filename."""
+    try:
+        # MongoDB connection with improved parameters
+        mongo_client = pymongo.MongoClient(
+            os.getenv("MONGO_URI"),
+            serverSelectionTimeoutMS=30000, 
+            connectTimeoutMS=30000,
+            socketTimeoutMS=60000,  
+            maxPoolSize=1,
+            retryWrites=True
+        )
+        
+        main_db = mongo_client["rag_system"]
+        
+        # Get GridFS instances
+        temp_fs = gridfs.GridFS(temp_db)
+        main_fs = gridfs.GridFS(main_db)
+        
+        # Get file content
+        file_content = temp_fs.get(upload['gridfs_id']).read()
+        
+        # Calculate original content hash before any processing
+        original_content_hash = hashlib.md5(file_content).hexdigest()
+        
+        # Check for duplicate content
+        is_duplicate, duplicate_filename = is_duplicate_content(file_content)
+        
+        if is_duplicate:
+            st.error(f"This file is a duplicate of '{duplicate_filename}' that already exists in the database.")
+            
+            # Mark as rejected in the pending_uploads collection
+            temp_db.pending_uploads.update_one(
+                {"_id": upload['_id']},
+                {"$set": {
+                    "status": "rejected",
+                    "rejected_at": datetime.now(),
+                    "rejection_reason": "duplicate_content",
+                    "duplicate_of": duplicate_filename
+                }}
+            )
+            
+            # Close MongoDB connection
+            mongo_client.close()
+            
+            # Return None to indicate that the process should be stopped
+            return None
+        
+        # Process the file (standardize name, compress)
+        standardized_filename = get_standardized_filename(
+            upload['filename'], 
+            file_content
+        )
+        
+        # Check by filename to avoid duplicates
+        existing_by_name = main_db.files.find_one({"filename": standardized_filename})
+        if existing_by_name:
+            st.error(f"A file with the same standardized name already exists in the database.")
+            
+            # Mark as rejected in the pending_uploads collection
+            temp_db.pending_uploads.update_one(
+                {"_id": upload['_id']},
+                {"$set": {
+                    "status": "rejected",
+                    "rejected_at": datetime.now(),
+                    "rejection_reason": "duplicate_filename",
+                    "duplicate_of": existing_by_name['filename']
+                }}
+            )
+            
+            # Close MongoDB connection
+            mongo_client.close()
+            
+            # Return None to indicate that the process should be stopped
+            return None
+        
+        # Compress the PDF
+        compressed_content = compress_pdf(file_content)
+        
+        # Calculate compression stats
+        original_size = len(file_content)
+        compressed_size = len(compressed_content)
+        compression_ratio = ((original_size - compressed_size) / original_size) * 100 if original_size > 0 else 0
+        
+        # Calculate content hash of the final compressed file
+        content_hash = hashlib.md5(compressed_content).hexdigest()
+        
+        # Save to main GridFS
+        main_file_id = main_fs.put(
+            compressed_content,
+            filename=standardized_filename,
+            content_type='application/pdf',
+            original_filename=upload['filename']
+        )
+        
+        # Save metadata to main files collection WITH BOTH HASH VALUES
+        main_db.files.insert_one({
+            "filename": standardized_filename,
+            "original_filename": upload['filename'],
+            "gridfs_id": main_file_id,
+            "size": compressed_size,
+            "original_size": original_size,
+            "compression_ratio": compression_ratio,
+            "original_content_hash": original_content_hash,  # Hash BEFORE compression
+            "content_hash": content_hash,                    # Hash AFTER compression
+            "source": "collaborator_upload",
+            "upload_id": upload['_id'],
+            "last_modified": time.time()
+        })
+        
+        # Update the session state list of files
+        if standardized_filename not in st.session_state.uploaded_files:
+            st.session_state.uploaded_files.append(standardized_filename)
+        
+        # Force a reset of the index to include the new file
+        st.session_state.index_hash = ""
+        
+        # Store the rename info for feedback with timestamp
+        temp_db.pending_uploads.update_one(
+            {"_id": upload['_id']},
+            {"$set": {
+                "status": "approved",
+                "approved_at": datetime.now(),
+                "standardized_filename": standardized_filename
+            }}
+        )
+        
+        # Set a flag to ensure files are refreshed in all tabs
+        if "files_refreshed" not in st.session_state:
+            st.session_state.files_refreshed = False
+        st.session_state.files_refreshed = True
+        
+        # Close MongoDB connection
+        mongo_client.close()
+        
+        return standardized_filename
+        
+    except Exception as e:
+        st.error(f"Error approving upload: {str(e)}")
+        
+        import traceback
+        st.error(traceback.format_exc())
+        return None
+
+# Update the download_and_process_pdf function with consistent hash storage
 def download_and_process_pdf(service, file_id, original_filename):
     """Download a PDF file from Google Drive, standardize name, and compress."""
     try:
@@ -1933,11 +2119,24 @@ def download_and_process_pdf(service, file_id, original_filename):
         # Get the file content
         file_content = file_buffer.getvalue()
         
+        # Calculate hash BEFORE compression
+        original_content_hash = hashlib.md5(file_content).hexdigest()
+        
+        # Check for duplicate content
+        is_duplicate, duplicate_filename = is_duplicate_content(file_content)
+        
+        if is_duplicate:
+            st.warning(f"File '{original_filename}' is a duplicate of '{duplicate_filename}' that already exists in the database.")
+            return None
+        
         # Get standardized filename
         standardized_filename = get_standardized_filename(original_filename, file_content)
         
         # Compress the PDF
         compressed_content = compress_pdf(file_content)
+        
+        # Calculate hash AFTER compression
+        content_hash = hashlib.md5(compressed_content).hexdigest()
         
         # Calculate compression ratio
         original_size = len(file_content)
@@ -1950,26 +2149,28 @@ def download_and_process_pdf(service, file_id, original_filename):
             'content': compressed_content,
             'original_size': original_size,
             'compressed_size': compressed_size,
-            'compression_ratio': compression_ratio
+            'compression_ratio': compression_ratio,
+            'original_content_hash': original_content_hash,  # Hash BEFORE compression
+            'content_hash': content_hash                     # Hash AFTER compression
         }
     except Exception as e:
         print(f"Error downloading/processing file {original_filename}: {e}")
         return None
 
-# Main function to import PDFs from Google Drive
+# Update the import_pdfs_from_google_drive function with consistent hash storage
 def import_pdfs_from_google_drive():
     """Import PDFs from Google Drive, process them, and save to MongoDB."""
     results = {
         'success': False,
         'total_files': 0,
         'processed_files': 0,
+        'skipped_files': 0,
         'error_files': 0,
         'total_size_original': 0,
         'total_size_compressed': 0,
         'files': []
     }
     
-    mongo_client = None
     try:
         # Authenticate with Google Drive
         creds = authenticate_google_drive()
@@ -1986,9 +2187,12 @@ def import_pdfs_from_google_drive():
         # Set OpenAI API key from environment variable
         openai.api_key = os.getenv("OPENAI_API_KEY")
         
-        # Add a progress bar
+        # Add a progress bar for all files
         progress_bar = st.progress(0)
         status_text = st.empty()
+        
+        # Track new files found
+        new_files = []
         
         # Process each PDF file
         for i, pdf_file in enumerate(pdf_files):
@@ -1996,80 +2200,105 @@ def import_pdfs_from_google_drive():
             original_filename = pdf_file['name']
             
             # Update progress
-            progress_bar.progress((i + 1) / len(pdf_files))
-            status_text.text(f"Processing file {i+1} of {len(pdf_files)}: {original_filename}")
+            progress_percent = (i + 1) / len(pdf_files)
+            progress_bar.progress(progress_percent)
+            status_text.text(f"Checking file {i+1} of {len(pdf_files)}: {original_filename}")
             
-            # Check if this file already exists in the database
-            if st.session_state.files_collection.find_one({"original_filename": original_filename}):
-                # Skip this file and count it as processed
-                results['processed_files'] += 1
+            # Check if already in database by Drive ID
+            drive_id_match = st.session_state.files_collection.find_one({"drive_file_id": file_id})
+            if drive_id_match:
+                results['skipped_files'] += 1
                 results['files'].append({
                     'original_filename': original_filename,
                     'status': 'skipped',
-                    'message': 'File already exists in the database'
+                    'message': f'File from same Google Drive source already exists as {drive_id_match["filename"]}'
                 })
                 continue
             
-            # Download and process the PDF
+            # Download and process the PDF - duplicate check happens inside this function
             processed_file = download_and_process_pdf(service, file_id, original_filename)
             
             if processed_file:
-                try:
-                    # Save to GridFS
-                    gridfs_file_id = st.session_state.fs.put(
-                        processed_file['content'],
-                        filename=processed_file['standardized_filename'],
-                        content_type='application/pdf',
-                        original_filename=original_filename
-                    )
-                    
-                    # Save file metadata to MongoDB
-                    st.session_state.files_collection.insert_one({
-                        "filename": processed_file['standardized_filename'],
-                        "original_filename": original_filename,
-                        "gridfs_id": gridfs_file_id,
-                        "size": processed_file['compressed_size'],
-                        "original_size": processed_file['original_size'],
-                        "compression_ratio": processed_file['compression_ratio'],
-                        "source": "google_drive",
-                        "drive_file_id": pdf_file['id'],
-                        "last_modified": time.time()
-                    })
-                    
-                    # Save to local temp directory
-                    temp_file_path = os.path.join(st.session_state.data_dir, processed_file['standardized_filename'])
-                    with open(temp_file_path, "wb") as f:
-                        f.write(processed_file['content'])
-                    
-                    # Add to session state uploaded files
-                    if processed_file['standardized_filename'] not in st.session_state.uploaded_files:
-                        st.session_state.uploaded_files.append(processed_file['standardized_filename'])
-                    
-                    # Update results statistics
-                    results['processed_files'] += 1
-                    results['total_size_original'] += processed_file['original_size']
-                    results['total_size_compressed'] += processed_file['compressed_size']
-                    results['files'].append({
-                        'original_filename': original_filename,
-                        'standardized_filename': processed_file['standardized_filename'],
-                        'status': 'success',
-                        'compression_ratio': processed_file['compression_ratio']
-                    })
-                except Exception as insert_error:
-                    # Record error during MongoDB insertion
-                    results['error_files'] += 1
-                    results['files'].append({
-                        'original_filename': original_filename,
-                        'status': 'error',
-                        'message': f'Failed to insert file: {str(insert_error)}'
-                    })
+                new_files.append((processed_file, file_id))  # Store the pair of processed file and Drive ID
             else:
-                # Record error during PDF processing
-                results['error_files'] += 1
+                # Already marked as duplicate in download_and_process_pdf function
+                results['skipped_files'] += 1
                 results['files'].append({
                     'original_filename': original_filename,
+                    'status': 'skipped',
+                    'message': 'File is a duplicate of an existing file'
+                })
+        
+        # Clear the progress indicators
+        progress_bar.empty()
+        status_text.empty()
+        
+        # Message if no new files
+        if not new_files:
+            st.info("No new PDF files to import. All files already exist in the database.")
+            results['message'] = "All files already exist in the database."
+            results['success'] = True
+            return results
+        
+        # Show how many new files we'll process
+        st.info(f"Found {len(new_files)} new PDF files to import out of {len(pdf_files)} total.")
+        
+        # Add a progress bar for saving new files
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # Save the new files to MongoDB
+        for i, (processed_file, drive_id) in enumerate(new_files):
+            # Update progress
+            progress_percent = (i + 1) / len(new_files)
+            progress_bar.progress(progress_percent)
+            status_text.text(f"Saving file {i+1} of {len(new_files)}: {processed_file['standardized_filename']}")
+            
+            try:
+                # Save to GridFS
+                gridfs_file_id = st.session_state.fs.put(
+                    processed_file['content'],
+                    filename=processed_file['standardized_filename'],
+                    content_type='application/pdf',
+                    original_filename=processed_file['original_filename']
+                )
+                
+                # Save file metadata to MongoDB WITH BOTH HASH VALUES
+                st.session_state.files_collection.insert_one({
+                    "filename": processed_file['standardized_filename'],
+                    "original_filename": processed_file['original_filename'],
+                    "gridfs_id": gridfs_file_id,
+                    "original_content_hash": processed_file['original_content_hash'],  # Hash BEFORE compression
+                    "content_hash": processed_file['content_hash'],                    # Hash AFTER compression
+                    "size": processed_file['compressed_size'],
+                    "original_size": processed_file['original_size'],
+                    "compression_ratio": processed_file['compression_ratio'],
+                    "source": "google_drive",
+                    "drive_file_id": drive_id,  # Add Drive ID for future duplicate checks
+                    "last_modified": time.time()
+                })
+                
+                # Add to session state uploaded files
+                if processed_file['standardized_filename'] not in st.session_state.uploaded_files:
+                    st.session_state.uploaded_files.append(processed_file['standardized_filename'])
+                
+                # Update results statistics
+                results['processed_files'] += 1
+                results['total_size_original'] += processed_file['original_size']
+                results['total_size_compressed'] += processed_file['compressed_size']
+                results['files'].append({
+                    'original_filename': processed_file['original_filename'],
+                    'standardized_filename': processed_file['standardized_filename'],
+                    'status': 'success',
+                    'compression_ratio': processed_file['compression_ratio']
+                })
+            except Exception as insert_error:
+                # Record error during MongoDB insertion
+                results['error_files'] += 1
+                results['files'].append({
+                    'original_filename': processed_file['original_filename'],
                     'status': 'error',
-                    'message': 'Failed to process file'
+                    'message': f'Failed to insert file: {str(insert_error)}'
                 })
         
         # Clear the progress bar and status text
@@ -2086,22 +2315,31 @@ def import_pdfs_from_google_drive():
             results['overall_compression_ratio'] = 0
         
         results['success'] = True
-        results['message'] = f"Successfully processed {results['processed_files']} out of {results['total_files']} files."
+        
+        # Create appropriate message based on what happened
+        if results['processed_files'] > 0:
+            results['message'] = f"Successfully processed {results['processed_files']} new files. Skipped {results['skipped_files']} existing files."
+        else:
+            results['message'] = f"No new files were processed. Skipped {results['skipped_files']} existing files."
         
         # Trigger reindexing if files were added
         if results['processed_files'] > 0:
             st.session_state.index_hash = ""
+            
+            # Set flag to trigger a UI refresh
+            st.session_state.files_refreshed = True
         
         return results
     
     except Exception as e:
         results['success'] = False
+
         results['message'] = f"Error importing PDFs from Google Drive: {str(e)}"
         import traceback
         results['error_details'] = traceback.format_exc()
         return results
 
-# Add this to your main function when creating the Google Drive tab
+# Update the Google Drive tab function to ensure proper refreshing of files in all tabs
 def google_drive_tab():
     st.write("Import PDFs from Google Drive")
     
@@ -2114,90 +2352,97 @@ def google_drive_tab():
             import_results = import_pdfs_from_google_drive()
             
             if import_results['success']:
-                st.success(import_results['message'])
-                
-                # Display statistics
-                st.write("### Import Statistics")
-                
-                # Use columns for the stats display
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Total Files", import_results['total_files'])
-                with col2:
-                    st.metric("Successfully Processed", import_results['processed_files'])
-                with col3:
-                    st.metric("Errors", import_results['error_files'])
-                
+                # Different display based on what happened
                 if import_results['processed_files'] > 0:
-                    # Show compression metrics
-                    st.write("### Compression Results")
+                    st.success(f"Successfully processed {import_results['processed_files']} new files. Skipped {import_results['skipped_files']} existing files.")
                     
-                    col1, col2 = st.columns(2)
+                    # Display statistics
+                    st.write("### Import Statistics")
+                    
+                    # Use columns for the stats display
+                    col1, col2, col3, col4 = st.columns(4)
                     with col1:
-                        original_size_mb = import_results['total_size_original'] / (1024 * 1024)
-                        compressed_size_mb = import_results['total_size_compressed'] / (1024 * 1024)
-                        st.metric("Original Size", f"{original_size_mb:.2f} MB")
+                        st.metric("Total Files", import_results['total_files'])
                     with col2:
-                        st.metric("Compressed Size", f"{compressed_size_mb:.2f} MB", 
-                                 delta=f"-{import_results['overall_compression_ratio']:.1f}%")
+                        st.metric("New Files Processed", import_results['processed_files'])
+                    with col3:
+                        st.metric("Existing Files Skipped", import_results['skipped_files'])
+                    with col4:
+                        st.metric("Errors", import_results['error_files'])
+                    
+                    # Show compression metrics
+                    if import_results['processed_files'] > 0:
+                        st.write("### Compression Results")
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            original_size_mb = import_results['total_size_original'] / (1024 * 1024)
+                            compressed_size_mb = import_results['total_size_compressed'] / (1024 * 1024)
+                            st.metric("Original Size", f"{original_size_mb:.2f} MB")
+                        with col2:
+                            st.metric("Compressed Size", f"{compressed_size_mb:.2f} MB", 
+                                    delta=f"-{import_results['overall_compression_ratio']:.1f}%")
                     
                     # Show file details in an expander
                     with st.expander("View Processed Files"):
+                        # First show successful files
+                        st.write("#### Successfully Processed:")
+                        success_count = 0
                         for file_info in import_results['files']:
                             if file_info['status'] == 'success':
+                                success_count += 1
                                 st.write(f"✅ **{file_info['original_filename']}** → **{file_info['standardized_filename']}**")
                                 st.write(f"   Compression: {file_info['compression_ratio']:.1f}% reduction")
-                            elif file_info['status'] == 'skipped':
-                                st.write(f"⏭️ **{file_info['original_filename']}** (skipped - already exists)")
-                            else:
-                                st.write(f"❌ **{file_info['original_filename']}** (error: {file_info.get('message', 'Unknown error')})")
-                            st.write("---")
+                                st.write("---")
                         
-                        # Automatically update the files list
+                        if success_count == 0:
+                            st.write("No files were successfully processed.")
+                        
+                        # Then show skipped files
+                        st.write("#### Skipped (Already Exist):")
+                        skip_count = 0
+                        for file_info in import_results['files']:
+                            if file_info['status'] == 'skipped':
+                                skip_count += 1
+                                st.write(f"⏭️ **{file_info['original_filename']}** ({file_info.get('message', 'already exists')})")
+                        
+                        if skip_count == 0:
+                            st.write("No files were skipped.")
+                            
+                        # Finally show error files
+                        if import_results['error_files'] > 0:
+                            st.write("#### Errors:")
+                            for file_info in import_results['files']:
+                                if file_info['status'] == 'error':
+                                    st.write(f"❌ **{file_info['original_filename']}** (error: {file_info.get('message', 'Unknown error')})")
+                    
+                    # Critical fix: Force a complete refresh of uploaded files list
+                    if import_results['processed_files'] > 0:
+                        # First update from MongoDB to get the latest files
                         st.session_state.uploaded_files = [
                             file_doc["filename"] for file_doc in st.session_state.files_collection.find({}, {"filename": 1, "_id": 0})
                         ]
-
-                        # Use rerun to refresh the entire page
-                        st.rerun()
+                        
+                        # Force reindex of the knowledge base
+                        st.session_state.index_hash = ""
+                        
+                        # Add a flag to indicate we should refresh the UI
+                        st.session_state.files_refreshed = True
+                        
+                        # Create a button to refresh the UI - when clicked, it will force a full rerun
+                        if st.button("Refresh Files List and Reindex", key="refresh_all"):
+                            st.rerun()
+                        else:
+                            # Automatically trigger a rerun to refresh everything
+                            st.rerun()
+                else:
+                    # No new files were processed
+                    st.info(import_results['message'])
             else:
                 st.error(import_results['message'])
                 if 'error_details' in import_results:
                     with st.expander("Error Details"):
                         st.code(import_results['error_details'])
-    
-    # Add information about naming conventions
-    with st.expander("PDF Naming Convention"):
-        st.markdown("""
-        ## Standard Naming Format
-        All PDF files follow this format:
-        **[Year]_[FirstAuthorLastName]_[PaperTitle]_[Category].pdf**
-        
-        ### Examples:
-        * 2023_Smith_Kinetic-Modeling-In-Alzheimers-Disease_Brain.pdf
-        * 2019_Johnson_Tracer-Kinetics-In-Lung-Tissue_Lung.pdf
-        * 2021_Wang_Advanced-Optimization-Algorithms-For-Kinetic-Analysis_Advanced.pdf
-        
-        ### Guidelines for Each Element
-        1. **Year [YYYY]**
-           * 4-digit year format (e.g., 2023)
-           * Unknown publication year uses the submission/preprint year followed by "pre" (e.g., 2023pre)
-           
-        2. **First Author's Last Name**
-           * Only last name of the first author
-           * Hyphenated last names include the hyphen (e.g., Smith-Jones)
-           * No first names or initials
-           
-        3. **Paper Title**
-           * For shorter titles, includes the full title with spaces replaced by hyphens
-           * For longer titles, includes only the first 5-6 significant words
-           * Articles (a, an, the) are removed when possible
-           
-        4. **Category**
-           * Main category (Brain, Lung, Liver, etc.)
-           * For multiple categories, uses the primary category
-           * Subcategories use format: Brain-Neuroinflammation
-        """)
 
 # Main Streamlit application
 def main():
@@ -2209,6 +2454,10 @@ def main():
     # Initialize session state
     if not initialize_session_state():
         st.stop()
+
+    # Add a files_refreshed flag if it doesn't exist
+    if "files_refreshed" not in st.session_state:
+        st.session_state.files_refreshed = False    
     
     # Routing based on session state
     if st.session_state.current_page == 'login':
@@ -2218,6 +2467,15 @@ def main():
     elif st.session_state.current_page == 'collaborator_upload':
         collaborator_upload_page()
     elif st.session_state.logged_in:
+        # If we've just refreshed the files, make sure the list is up to date
+        if st.session_state.files_refreshed:
+            # Refresh uploaded files from MongoDB
+            st.session_state.uploaded_files = [
+                file_doc["filename"] for file_doc in st.session_state.files_collection.find({}, {"filename": 1, "_id": 0})
+            ]
+            # Reset the flag
+            st.session_state.files_refreshed = False
+
         # Title
         st.title("Kinetic Modeling - RAG")
         
@@ -2317,11 +2575,12 @@ def main():
                 ]
                 
                 # Display PDF list with delete buttons
-                for pdf in filtered_pdfs:
+                for i, pdf in enumerate(filtered_pdfs):
                     col1, col2 = st.columns([3, 1])
                     col1.write(pdf)
-                    # Use a trash bin emoji for the delete button
-                    if col2.button("🗑️", key=f"delete_{pdf}", help="Delete this PDF"):
+                    # Use a unique key by adding an index to prevent duplicates
+                    safe_pdf = pdf.replace(".", "_").replace(" ", "_").replace("-", "_")
+                    if col2.button("🗑️", key=f"delete_{i}_{safe_pdf[:20]}", help="Delete this PDF"):
                         set_delete_confirmation(pdf)
                 
                 # Show message if no PDFs match the search
@@ -2369,18 +2628,19 @@ def main():
                         cancel_delete()
                 
                 # Display URL list with delete buttons
-                for url in st.session_state.urls:
+                for i, url in enumerate(st.session_state.urls):
                     col1, col2 = st.columns([3, 1])
                     
                     # Show shortened URL for display
                     display_url = url if len(url) < 30 else url[:27] + "..."
                     
                     # Use Streamlit's native link component instead of HTML
-                    # This approach uses Streamlit's built-in link function
                     col1.write(f"[{display_url}]({url})")
                     
-                    # Use a trash bin emoji for the delete button
-                    if col2.button("🗑️", key=f"delete_url_{url}", help="Remove this URL"):
+                    # Use a unique key with index to prevent duplicates
+                    # Use safe characters only
+                    safe_url = url.replace("://", "_").replace(".", "_").replace("/", "_")
+                    if col2.button("🗑️", key=f"delete_url_{i}_{safe_url[:10]}", help="Remove this URL"):
                         set_delete_url_confirmation(url)
 
             with tab3:
