@@ -1057,27 +1057,28 @@ def cancel_delete():
 
 def generate_suggested_questions(query_engine, force_refresh=False):
     try:
-        # Add some randomness instruction to the prompt
+        # Add more emphasis on diversity in the prompt
         system_prompt = """
         Based on the current content in the knowledge base, generate 5 diverse and interesting starter questions 
         that users might want to ask. The questions should:
         
         1. Be directly answerable from the CURRENT knowledge base content
-        2. Cover different topics or aspects of the available documents
+        2. Cover different topics or aspects from DIFFERENT documents in the knowledge base
         3. Be concise (10 words or less) but specific enough to be meaningful
-        4. Focus on different documents if possible, not just the most recent one
+        4. Each question MUST come from a different document when possible
         5. Be in the form of questions (end with ?)
 
         IMPORTANT GUIDELINES:
+        - DO NOT concentrate questions on a single document
+        - MAXIMIZE diversity across different documents in the knowledge base
         - DO NOT mention specific author names or paper titles in the questions
         - DO NOT reference specific page numbers or sections like "page 1" or "section 3.2"
         - Focus on the concepts and topics rather than the sources
         - Make questions accessible to someone who hasn't read the documents yet
         - Questions should be general enough that a new user would understand them
         
-        Try to be creative and generate questions that explore different aspects of the knowledge base.
-        
         Format the response as a numbered list with just the questions, no additional text.
+        Each question must come from a different document when possible.
         """
 
         # Get more questions than we need
@@ -1094,24 +1095,33 @@ def generate_suggested_questions(query_engine, force_refresh=False):
         # If we got enough questions, randomly select 3
         if len(suggested_questions) >= 4:
             import random
-            return random.sample(suggested_questions, 3)
+            # Shuffle the list to ensure diversity
+            random.shuffle(suggested_questions)
+            return suggested_questions[:3]
         
-        # Otherwise use the fallbacks
+        # Otherwise use the fallbacks or what we have
         if len(suggested_questions) < 3:
-            suggested_questions = [
+            # Add some fallbacks that ask about different document types
+            fallbacks = [
                 "What documents are currently in the knowledge base?",
-                "What topics are covered in the available sources?",
-                "Can you summarize the main content of current documents?"
+                "What kinetic modeling approaches are discussed?",
+                "How are different organs modeled in the papers?",
+                "What are the main imaging techniques mentioned?",
+                "What mathematical models are used across these papers?"
             ]
+            # Add enough fallbacks to reach 3 questions total
+            import random
+            random.shuffle(fallbacks)
+            suggested_questions.extend(fallbacks[:3-len(suggested_questions)])
         
-        return suggested_questions
+        return suggested_questions[:3]  # Return at most 3 questions
     
-    except Exception:
-        # Default fallbacks
+    except Exception as e:
+        # Default fallbacks with more diversity
         return [
-            "What documents are currently available?",
-            "What kind of information can I find here?",
-            "Can you help me understand the current knowledge base?"
+            "What types of documents are in the knowledge base?",
+            "What imaging modalities are discussed in these papers?", 
+            "What mathematical models are used in kinetic modeling?"
         ]
 
 def display_chat_interface(query_engine):
