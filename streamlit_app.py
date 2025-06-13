@@ -908,7 +908,7 @@ def load_and_index_documents():
             chunk_size=512,
             chunk_overlap=50,
             paragraph_separator="\n\n",
-            secondary_chunking_regex="(?<=\. )"
+            secondary_chunking_regex=r"(?<=\. )"
         )
         
         # Set the node parser in settings
