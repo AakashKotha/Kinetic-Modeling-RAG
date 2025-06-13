@@ -40,6 +40,11 @@ import openai
 import uuid
 from datetime import datetime, timedelta
 
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.units import inch
+
 try:
     # python2
     from urlparse import urlparse
@@ -2947,6 +2952,248 @@ def spreadsheet_url_tab():
         # Then rerun the app
         st.rerun()
 
+def import_abstracts_from_spreadsheet(spreadsheet_id=None):
+    """Import abstracts from spreadsheet and create document-like entries."""
+    if not spreadsheet_id:
+        spreadsheet_id = GOOGLE_SPREADSHEET_ID
+        
+    results = {
+        'success': False,
+        'total_abstracts': 0,
+        'processed_abstracts': 0,
+        'skipped_abstracts': 0,
+        'error_abstracts': 0,
+        'abstracts': []
+    }
+    
+    try:
+        # Use your existing Google Sheets authentication
+        creds = authenticate_google_sheets()
+        service = build('sheets', 'v4', credentials=creds)
+        
+        # Get spreadsheet data
+        range_name = f"Sheet1!A:D"  # Adjust sheet name as needed
+        sheet = service.spreadsheets()
+        result = sheet.values().get(spreadsheetId=spreadsheet_id, range=range_name).execute()
+        values = result.get('values', [])
+        
+        if not values:
+            return {'success': False, 'message': 'No data found in spreadsheet.'}
+        
+        # Skip header row, process only first 5 abstracts for testing
+        for i, row in enumerate(values[1:6], 2):  # Start from row 2, only process 5 rows
+            if len(row) < 3:  # Need at least Title, Authors, Abstract
+                continue
+                
+            title = row[0].strip() if len(row) > 0 and row[0] else f"Abstract {i}"
+            authors = row[1].strip() if len(row) > 1 and row[1] else "Unknown Authors"
+            abstract = row[2].strip() if len(row) > 2 and row[2] else ""
+            url = row[3].strip() if len(row) > 3 and row[3] else ""
+            
+            if not abstract:
+                results['skipped_abstracts'] += 1
+                continue
+            
+            # Create structured content (like a mini research paper)
+            content = f"""Title: {title}
+
+Authors: {authors}
+
+Abstract:
+{abstract}
+
+Source: {url if url else 'Manual Entry'}
+
+Document Type: Abstract Only
+Field: Kinetic Modeling Research
+"""
+            
+            # Generate standardized filename
+            safe_title = re.sub(r'[<>:"/\\|?*]', '', title)[:50]
+            filename = f"Abstract_{i:03d}_{safe_title}.pdf"
+            
+            try:
+                # Create PDF content in memory
+                pdf_content = create_pdf_from_text(content, title)
+                
+                # Check for duplicates (by title or content hash)
+                content_hash = hashlib.md5(content.encode()).hexdigest()
+                existing = st.session_state.files_collection.find_one({
+                    "$or": [
+                        {"filename": filename},
+                        {"content_hash": content_hash},
+                        {"metadata.title": title}
+                    ]
+                })
+                
+                if existing:
+                    results['skipped_abstracts'] += 1
+                    results['abstracts'].append({
+                        'title': title,
+                        'status': 'skipped',
+                        'message': 'Already exists'
+                    })
+                    continue
+                
+                # Save to MongoDB GridFS
+                file_id = st.session_state.fs.put(
+                    pdf_content,
+                    filename=filename,
+                    content_type='application/pdf'
+                )
+                
+                # Save metadata
+                st.session_state.files_collection.insert_one({
+                    "filename": filename,
+                    "original_filename": filename,
+                    "gridfs_id": file_id,
+                    "content_hash": content_hash,
+                    "size": len(pdf_content),
+                    "source": "abstract_import",
+                    "document_type": "abstract",
+                    "metadata": {
+                        "title": title,
+                        "authors": authors,
+                        "pubmed_url": url,
+                        "row_number": i
+                    },
+                    "last_modified": time.time()
+                })
+                
+                # Update session state
+                if filename not in st.session_state.uploaded_files:
+                    st.session_state.uploaded_files.append(filename)
+                
+                results['processed_abstracts'] += 1
+                results['abstracts'].append({
+                    'title': title,
+                    'filename': filename,
+                    'status': 'success',
+                    'authors': authors
+                })
+                
+            except Exception as e:
+                results['error_abstracts'] += 1
+                results['abstracts'].append({
+                    'title': title,
+                    'status': 'error',
+                    'message': str(e)
+                })
+        
+        results['total_abstracts'] = len(values) - 1  # Exclude header
+        results['success'] = True
+        results['message'] = f"Processed {results['processed_abstracts']} abstracts successfully."
+        
+        # Force reindexing
+        if results['processed_abstracts'] > 0:
+            st.session_state.index_hash = ""
+        
+        return results
+        
+    except Exception as e:
+        results['success'] = False
+        results['message'] = f"Error importing abstracts: {str(e)}"
+        return results
+
+
+def create_pdf_from_text(content, title):
+    """Create a simple PDF from text content using reportlab."""
+    # Create PDF in memory
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=1*inch)
+    
+    # Styles
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=16,
+        spaceAfter=20,
+        alignment=1  # Center
+    )
+    
+    # Build PDF content
+    story = []
+    
+    # Add title
+    story.append(Paragraph(title, title_style))
+    story.append(Spacer(1, 20))
+    
+    # Add content (split by paragraphs)
+    for line in content.split('\n'):
+        if line.strip():
+            if line.startswith('Title:') or line.startswith('Authors:') or line.startswith('Abstract:'):
+                story.append(Paragraph(f"<b>{line}</b>", styles['Normal']))
+            else:
+                story.append(Paragraph(line, styles['Normal']))
+            story.append(Spacer(1, 10))
+    
+    # Build PDF
+    doc.build(story)
+    
+    # Get PDF content
+    pdf_content = buffer.getvalue()
+    buffer.close()
+    
+    return pdf_content
+        
+# Add this to your admin dropdown options
+def abstracts_import_tab():
+    """Tab for importing abstracts from spreadsheet as PDFs."""
+    with st.sidebar:
+        st.write("## Import Abstracts as Documents")
+        
+        # Allow custom spreadsheet ID input
+        custom_spreadsheet_id = st.text_input(
+            "Spreadsheet ID:", 
+            value="1AT7ROzAQrV2uU2aBoUQvQfbapZOitbk9_8UkYKIrrjg", 
+            help="Enter Google Sheets ID from URL"
+        )
+        
+        st.info(f"Using Spreadsheet ID: {custom_spreadsheet_id}")
+        st.write("**Expected columns:** Title (A), Authors (B), Abstract (C), URL (D)")
+        
+        if st.button("Import Abstracts as PDFs", key="import_abstracts"):
+            if not custom_spreadsheet_id:
+                st.error("Please enter a valid Spreadsheet ID")
+                return
+                
+            with st.spinner("Processing abstracts..."):
+                import_results = import_abstracts_from_spreadsheet(custom_spreadsheet_id)
+            
+                if import_results['success']:
+                    if import_results['processed_abstracts'] > 0:
+                        st.success(f"Successfully imported {import_results['processed_abstracts']} abstracts as PDF documents!")
+                        
+                        # Show statistics
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("Total Abstracts", import_results['total_abstracts'])
+                        with col2:
+                            st.metric("Imported", import_results['processed_abstracts'])
+                        with col3:
+                            st.metric("Skipped", import_results['skipped_abstracts'])
+                        with col4:
+                            st.metric("Errors", import_results['error_abstracts'])
+                        
+                        # Show details
+                        with st.expander("View Import Details"):
+                            for abstract in import_results['abstracts']:
+                                if abstract['status'] == 'success':
+                                    st.write(f"✅ **{abstract['title']}** → {abstract['filename']}")
+                                elif abstract['status'] == 'skipped':
+                                    st.write(f"⏭️ **{abstract['title']}** ({abstract['message']})")
+                                else:
+                                    st.write(f"❌ **{abstract['title']}** ({abstract['message']})")
+                        
+                        # Trigger rerun to refresh file list
+                        if st.button("Refresh Files List", key="refresh_after_abstract_import"):
+                            st.rerun()
+                    else:
+                        st.info("No new abstracts to import.")
+                else:
+                    st.error(import_results['message'])
+
 # Main Streamlit application
 def main():
 
@@ -3009,6 +3256,7 @@ def main():
                 "Google Drive", 
                 "URLs",
                 "Spreadsheet URLs",
+                 "Abstract Import",
                 "Collaborator Uploads", 
                 "Embeddings"
             ]
@@ -3215,6 +3463,9 @@ def main():
             elif selected_option == "Spreadsheet URLs":
                 with st.sidebar:
                     spreadsheet_url_tab()
+
+            elif selected_option == "Abstract Import":  # NEW HANDLER
+                abstracts_import_tab()        
 
             elif selected_option == "Collaborator Uploads":
                 with st.sidebar:
