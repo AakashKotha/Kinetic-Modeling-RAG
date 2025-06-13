@@ -1179,8 +1179,17 @@ def display_chat_interface(query_engine):
         with st.chat_message("assistant"):
             st.write(assistant_msg)
     
-    # Show suggested questions only if this is the first interaction (empty chat history)
-    if len(st.session_state.chat_history) == 0 and query_engine is not None:
+    # Add a flag to track if we're processing a suggested question
+    if "processing_suggested_question" not in st.session_state:
+        st.session_state.processing_suggested_question = False
+    
+    # Show suggested questions only if:
+    # 1. Chat history is empty AND
+    # 2. We're not currently processing a suggested question
+    if (len(st.session_state.chat_history) == 0 and 
+        query_engine is not None and 
+        not st.session_state.processing_suggested_question):
+        
         st.write("Suggested questions:")
         
         # Generate suggested questions based on knowledge base
@@ -1206,18 +1215,21 @@ def display_chat_interface(query_engine):
         if "question_text" not in st.session_state:
             st.session_state.question_text = ""
         
-        # Function to handle button clicks
+        # Function to handle button clicks - MODIFIED to set processing flag
         def handle_q1_click():
             st.session_state.q1_clicked = True
             st.session_state.question_text = suggested_questions[0]
+            st.session_state.processing_suggested_question = True  # ADD THIS LINE
         
         def handle_q2_click():
             st.session_state.q2_clicked = True
             st.session_state.question_text = suggested_questions[1]
+            st.session_state.processing_suggested_question = True  # ADD THIS LINE
         
         def handle_q3_click():
             st.session_state.q3_clicked = True
             st.session_state.question_text = suggested_questions[2]
+            st.session_state.processing_suggested_question = True  # ADD THIS LINE
         
         # Display clickable buttons for each suggested question
         col1, col2, col3 = st.columns(3)
@@ -1308,11 +1320,6 @@ def display_chat_interface(query_engine):
         # Place the send button in the third column 
         with col3:
             send_pressed = st.button("Send", key="send_message", on_click=handle_send, use_container_width=True)
-    
-    # We don't need this anymore since we're using the on_click handler
-    # if send_pressed and user_message:
-    #     process_new_message(user_message, query_engine)
-    #     st.rerun()
 
 def process_new_message(user_message, query_engine):
     if not user_message:
@@ -1343,7 +1350,7 @@ def process_new_message(user_message, query_engine):
             {context}
 
             INSTRUCTIONS:
-            - Give more proiority to the "Most recent exchange", if the query is a follow-up. 
+            - Give more priority to the "Most recent exchange", if the query is a follow-up. 
             - If the user's message is a follow-up, continue the topic accordingly using the most recent exchange.
             - If it's a new or unrelated question, find relevant context in the conversation history.
             - If clarification is needed, ask a concise follow-up question.
@@ -1364,6 +1371,10 @@ def process_new_message(user_message, query_engine):
 
     # Save new exchange
     st.session_state.chat_history.append((user_message, assistant_response))
+    
+    # RESET the processing flag after message is processed
+    if hasattr(st.session_state, 'processing_suggested_question'):
+        st.session_state.processing_suggested_question = False            
 
 # Function to export embeddings in a suitable format for comparative analysis
 def export_embeddings(index):
