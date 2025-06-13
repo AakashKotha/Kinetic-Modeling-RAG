@@ -3003,327 +3003,343 @@ def main():
         if st.session_state.is_admin:
             st.sidebar.title("Knowledge Base Management")
             
-            # Create tabs for PDF and URL management
-            tab1, tab2, tab3, tab4, tab5, tab6 = st.sidebar.tabs([
+            # Dropdown selection instead of tabs
+            management_options = [
                 "PDF Documents",
-                "Google Drive",
-                "URLs", 
-                "Spreadsheet URLs", 
-                "Collaborator Uploads",
+                "Google Drive", 
+                "URLs",
+                "Spreadsheet URLs",
+                "Collaborator Uploads", 
                 "Embeddings"
-            ])
-
+            ]
             
-            with tab1:
-                st.write("Upload a new PDF")
-                uploaded_file = st.file_uploader("PDF Upload", type="pdf", key="file_uploader", 
-                                                accept_multiple_files=False, label_visibility="collapsed")
-                
-                # Display success/error messages if they exist
-                if st.session_state.upload_success_message:
-                    st.success(st.session_state.upload_success_message)
-                    st.session_state.upload_success_message = None
+            selected_option = st.sidebar.selectbox(
+                "Select Management Option:",
+                management_options,
+                key="admin_management_dropdown"
+            )
+            
+            # Add a divider after the dropdown
+            st.sidebar.markdown("---")
+            
+            # Load content based on selection
+            if selected_option == "PDF Documents":
+                with st.sidebar:
+                    st.write("Upload a new PDF")
+                    uploaded_file = st.file_uploader("PDF Upload", type="pdf", key="file_uploader", 
+                                                    accept_multiple_files=False, label_visibility="collapsed")
                     
-                if st.session_state.delete_success_message:
-                    st.success(st.session_state.delete_success_message)
-                    st.session_state.delete_success_message = None
+                    # Display success/error messages if they exist
+                    if st.session_state.upload_success_message:
+                        st.success(st.session_state.upload_success_message)
+                        st.session_state.upload_success_message = None
+                        
+                    if st.session_state.delete_success_message:
+                        st.success(st.session_state.delete_success_message)
+                        st.session_state.delete_success_message = None
+                        
+                    if st.session_state.delete_error_message:
+                        st.error(st.session_state.delete_error_message)
+                        st.session_state.delete_error_message = None
                     
-                if st.session_state.delete_error_message:
-                    st.error(st.session_state.delete_error_message)
-                    st.session_state.delete_error_message = None
-                
-                # Handle file upload with proper state management
-                if uploaded_file is not None and uploaded_file.name not in st.session_state.uploaded_files:
-                    handle_file_upload(uploaded_file)
-                
-                # Add another divider before the PDF list
-                st.markdown("---")
-
-                # Add "Delete All" button at the top if PDFs exist
-                if st.session_state.uploaded_files:
-                    if st.button("🗑️ Delete All PDFs", key="delete_all_pdfs", help="Delete all PDFs"):
-                        st.session_state.confirm_delete_all = True
-                        st.rerun()
-                
-                # Add confirmation dialog for "Delete All PDFs"
-                if "confirm_delete_all" not in st.session_state:
-                    st.session_state.confirm_delete_all = False
+                    # Handle file upload with proper state management
+                    if uploaded_file is not None and uploaded_file.name not in st.session_state.uploaded_files:
+                        handle_file_upload(uploaded_file)
                     
-                if st.session_state.confirm_delete_all:
-                    st.warning("⚠️ Are you sure you want to delete ALL PDFs? This action cannot be undone.")
-                    col1, col2 = st.columns(2)
-                    if col1.button("Yes, Delete All", key="confirm_all_yes"):
-                        if delete_all_pdfs():
-                            st.session_state.confirm_delete_all = False
-                            st.rerun()
-                    if col2.button("Cancel", key="confirm_all_no"):
-                        st.session_state.confirm_delete_all = False
-                        st.rerun()
-                
-                # Add divider after delete all option
-                if st.session_state.uploaded_files:
+                    # Add another divider before the PDF list
                     st.markdown("---")
 
-                # Add search box for PDFs
-                search_query = st.text_input("Search PDFs", placeholder="Enter filename to search...", key="pdf_search_input")
-                
-                # Display available PDFs heading
-                st.write("Available PDFs:")    
-                    
-                # Delete confirmation dialog for individual PDFs
-                if st.session_state.confirm_delete:
-                    st.warning(f"Are you sure you want to delete {st.session_state.confirm_delete}?")
-                    col1, col2 = st.columns(2)
-                    if col1.button("Yes, Delete", key="confirm_yes"):
-                        confirm_delete()
-                    if col2.button("Cancel", key="confirm_no"):
-                        cancel_delete()
-                
-                # Filter PDFs based on search query
-                filtered_pdfs = [
-                    pdf for pdf in st.session_state.uploaded_files 
-                    if search_query.lower() in pdf.lower()
-                ]
-                
-                # Display PDF list with direct download and delete buttons
-                for i, pdf in enumerate(filtered_pdfs):
-                    col1, col2, col3 = st.columns([3, 0.8, 0.8])  # Adjust column widths
-                    col1.write(pdf)
-                    
-                    # Create unique keys for each button
-                    safe_pdf = pdf.replace(".", "_").replace(" ", "_").replace("-", "_")
-                    
-                    # Get file data in advance (before button click)
-                    try:
-                        # Get file from GridFS
-                        file_doc = st.session_state.files_collection.find_one({"filename": pdf})
-                        if file_doc and "gridfs_id" in file_doc:
-                            # Direct download button
-                            file_data = st.session_state.fs.get(file_doc["gridfs_id"]).read()
-                            col2.download_button(
-                                label="📥",
-                                data=file_data,
-                                file_name=pdf,
-                                mime="application/pdf",
-                                key=f"download_{i}_{safe_pdf[:20]}",
-                                help="Download this PDF"
-                            )
-                        else:
-                            # Display disabled button if file not found
-                            col2.button("📥", key=f"download_missing_{i}_{safe_pdf[:20]}", disabled=True)
-                    except Exception as e:
-                        # Display disabled button on error
-                        col2.button("📥", key=f"download_error_{i}_{safe_pdf[:20]}", disabled=True)
-                        st.error(f"Error preparing file: {str(e)}")
-                    
-                    # Delete button
-                    if col3.button("🗑️", key=f"delete_{i}_{safe_pdf[:20]}", help="Delete this PDF"):
-                        set_delete_confirmation(pdf)
-                
-                # Show message if no PDFs match the search
-                if not filtered_pdfs and search_query:
-                    st.info(f"No PDFs found matching '{search_query}'")
-                elif not filtered_pdfs and not search_query and not st.session_state.uploaded_files:
-                    st.info("No PDFs uploaded yet")       
-            
-            with tab2:
-                google_drive_tab() 
-
-            with tab3:
-                # Add new URL
-                st.write("Add a new URL")
-                
-                # Initialize url_input in session state if it doesn't exist
-                if "url_input" not in st.session_state:
-                    st.session_state.url_input = ""
-                
-                # Handle URL input clearing more reliably
-                if st.session_state.get("should_clear_url", False):
-                    st.session_state.url_input = ""
-                    st.session_state.should_clear_url = False
-                
-                # Create the URL input with a form to ensure proper handling
-                with st.form(key="url_form", clear_on_submit=True):
-                    url_input = st.text_input(
-                        "Enter URL", 
-                        placeholder="https://example.com",
-                        key="url_form_input"
-                    )
-                    
-                    # Submit button inside the form
-                    submitted = st.form_submit_button("Add URL")
-                    
-                    if submitted and url_input:
-                        # Use the form input directly instead of session state
-                        if not uri_validator(url_input.strip()):
-                            st.error("Please enter a valid URL.")
-                        elif url_input.strip() in st.session_state.urls:
-                            st.error(f"URL already exists: {url_input.strip()}")
-                        else:
-                            # Add the URL
-                            st.session_state.urls.append(url_input.strip())
-                            update_save_urls(st.session_state.urls)
-                            st.success(f"Added URL: {url_input.strip()}")
-                            
-                            # Force reindex
-                            st.session_state.index_hash = ""
-                            
-                            # Rerun to refresh the interface
+                    # Add "Delete All" button at the top if PDFs exist
+                    if st.session_state.uploaded_files:
+                        if st.button("🗑️ Delete All PDFs", key="delete_all_pdfs", help="Delete all PDFs"):
+                            st.session_state.confirm_delete_all = True
                             st.rerun()
-                
-                # Display available URLs
-                st.write("Available URLs:")
-                
-                # Delete confirmation dialog for URLs
-                if st.session_state.get("confirm_delete_url"):
-                    st.warning(f"Are you sure you want to remove this URL?")
-                    st.write(st.session_state.confirm_delete_url)
-                    col1, col2 = st.columns(2)
-                    if col1.button("Yes, Remove", key="confirm_url_yes"):
-                        confirm_delete_url()
-                    if col2.button("Cancel", key="confirm_url_no"):
-                        cancel_delete()
-                
-                # Display URL list with delete buttons
-                for i, url in enumerate(st.session_state.urls):
-                    col1, col2 = st.columns([3, 1])
                     
-                    # Show shortened URL for display
-                    display_url = url if len(url) < 50 else url[:47] + "..."
-                    
-                    # Use Streamlit's native link component
-                    col1.write(f"[{display_url}]({url})")
-                    
-                    # Use a unique key with index to prevent duplicates
-                    safe_url = url.replace("://", "_").replace(".", "_").replace("/", "_")[:10]
-                    if col2.button("🗑️", key=f"delete_url_{i}_{safe_url}", help="Remove this URL"):
-                        set_delete_url_confirmation(url)
-
-            # Spreadsheet URLs
-            with tab4:
-                spreadsheet_url_tab()           
-
-            with tab5:
-                collaborator_uploads_review_tab()  
-
-            with tab6:
-                st.write("Export Embeddings for Manifold Comparison")
-                
-                # Display information about the current index
-                # Check if there are documents or URLs instead of checking the index directly
-                if len(st.session_state.uploaded_files) > 0 or len(st.session_state.urls) > 0:
-                    # If we're currently indexing, show that status
-                    if st.session_state.indexing_status == "in_progress":
-                        st.info("Indexing in progress. Please wait for indexing to complete before exporting.")
-                    else:
-                        # Get approximate size of the index if possible
-                        try:
-                            if st.session_state.index is not None and hasattr(st.session_state.index, "_docstore") and hasattr(st.session_state.index._docstore, "_nodes"):
-                                node_count = len(st.session_state.index._docstore._nodes)
-                                st.write(f"Current index contains approximately {node_count} nodes.")
-                            else:
-                                st.write(f"Index is available for export.")
-                        except Exception:
-                            st.write("Index is available for export.")
+                    # Add confirmation dialog for "Delete All PDFs"
+                    if "confirm_delete_all" not in st.session_state:
+                        st.session_state.confirm_delete_all = False
                         
-                        # Add export button
-                        if st.button("Export Embeddings", key="export_embeddings"):
-                            with st.spinner("Exporting embeddings..."):
-                                success, result = export_embeddings(st.session_state.index)
+                    if st.session_state.confirm_delete_all:
+                        st.warning("⚠️ Are you sure you want to delete ALL PDFs? This action cannot be undone.")
+                        col1, col2 = st.columns(2)
+                        if col1.button("Yes, Delete All", key="confirm_all_yes"):
+                            if delete_all_pdfs():
+                                st.session_state.confirm_delete_all = False
+                                st.rerun()
+                        if col2.button("Cancel", key="confirm_all_no"):
+                            st.session_state.confirm_delete_all = False
+                            st.rerun()
+                    
+                    # Add divider after delete all option
+                    if st.session_state.uploaded_files:
+                        st.markdown("---")
+
+                    # Add search box for PDFs
+                    search_query = st.text_input("Search PDFs", placeholder="Enter filename to search...", key="pdf_search_input")
+                    
+                    # Display available PDFs heading
+                    st.write("Available PDFs:")    
+                        
+                    # Delete confirmation dialog for individual PDFs
+                    if st.session_state.confirm_delete:
+                        st.warning(f"Are you sure you want to delete {st.session_state.confirm_delete}?")
+                        col1, col2 = st.columns(2)
+                        if col1.button("Yes, Delete", key="confirm_yes"):
+                            confirm_delete()
+                        if col2.button("Cancel", key="confirm_no"):
+                            cancel_delete()
+                    
+                    # Filter PDFs based on search query
+                    filtered_pdfs = [
+                        pdf for pdf in st.session_state.uploaded_files 
+                        if search_query.lower() in pdf.lower()
+                    ]
+                    
+                    # Display PDF list with direct download and delete buttons
+                    for i, pdf in enumerate(filtered_pdfs):
+                        col1, col2, col3 = st.columns([3, 0.8, 0.8])  # Adjust column widths
+                        col1.write(pdf)
+                        
+                        # Create unique keys for each button
+                        safe_pdf = pdf.replace(".", "_").replace(" ", "_").replace("-", "_")
+                        
+                        # Get file data in advance (before button click)
+                        try:
+                            # Get file from GridFS
+                            file_doc = st.session_state.files_collection.find_one({"filename": pdf})
+                            if file_doc and "gridfs_id" in file_doc:
+                                # Direct download button
+                                file_data = st.session_state.fs.get(file_doc["gridfs_id"]).read()
+                                col2.download_button(
+                                    label="📥",
+                                    data=file_data,
+                                    file_name=pdf,
+                                    mime="application/pdf",
+                                    key=f"download_{i}_{safe_pdf[:20]}",
+                                    help="Download this PDF"
+                                )
+                            else:
+                                # Display disabled button if file not found
+                                col2.button("📥", key=f"download_missing_{i}_{safe_pdf[:20]}", disabled=True)
+                        except Exception as e:
+                            # Display disabled button on error
+                            col2.button("📥", key=f"download_error_{i}_{safe_pdf[:20]}", disabled=True)
+                            st.error(f"Error preparing file: {str(e)}")
+                        
+                        # Delete button
+                        if col3.button("🗑️", key=f"delete_{i}_{safe_pdf[:20]}", help="Delete this PDF"):
+                            set_delete_confirmation(pdf)
+                    
+                    # Show message if no PDFs match the search
+                    if not filtered_pdfs and search_query:
+                        st.info(f"No PDFs found matching '{search_query}'")
+                    elif not filtered_pdfs and not search_query and not st.session_state.uploaded_files:
+                        st.info("No PDFs uploaded yet")
+
+            elif selected_option == "Google Drive":
+                with st.sidebar:
+                    google_drive_tab()
+
+            elif selected_option == "URLs":
+                with st.sidebar:
+                    # Add new URL
+                    st.write("Add a new URL")
+                    
+                    # Initialize url_input in session state if it doesn't exist
+                    if "url_input" not in st.session_state:
+                        st.session_state.url_input = ""
+                    
+                    # Handle URL input clearing more reliably
+                    if st.session_state.get("should_clear_url", False):
+                        st.session_state.url_input = ""
+                        st.session_state.should_clear_url = False
+                    
+                    # Create the URL input with a form to ensure proper handling
+                    with st.form(key="url_form", clear_on_submit=True):
+                        url_input = st.text_input(
+                            "Enter URL", 
+                            placeholder="https://example.com",
+                            key="url_form_input"
+                        )
+                        
+                        # Submit button inside the form
+                        submitted = st.form_submit_button("Add URL")
+                        
+                        if submitted and url_input:
+                            # Use the form input directly instead of session state
+                            if not uri_validator(url_input.strip()):
+                                st.error("Please enter a valid URL.")
+                            elif url_input.strip() in st.session_state.urls:
+                                st.error(f"URL already exists: {url_input.strip()}")
+                            else:
+                                # Add the URL
+                                st.session_state.urls.append(url_input.strip())
+                                update_save_urls(st.session_state.urls)
+                                st.success(f"Added URL: {url_input.strip()}")
                                 
-                                # Inside the success block of the export function:
-                                if success:
-                                    st.success("Embeddings exported successfully! Choose a format to download:")
+                                # Force reindex
+                                st.session_state.index_hash = ""
+                                
+                                # Rerun to refresh the interface
+                                st.rerun()
+                    
+                    # Display available URLs
+                    st.write("Available URLs:")
+                    
+                    # Delete confirmation dialog for URLs
+                    if st.session_state.get("confirm_delete_url"):
+                        st.warning(f"Are you sure you want to remove this URL?")
+                        st.write(st.session_state.confirm_delete_url)
+                        col1, col2 = st.columns(2)
+                        if col1.button("Yes, Remove", key="confirm_url_yes"):
+                            confirm_delete_url()
+                        if col2.button("Cancel", key="confirm_url_no"):
+                            cancel_delete()
+                    
+                    # Display URL list with delete buttons
+                    for i, url in enumerate(st.session_state.urls):
+                        col1, col2 = st.columns([3, 1])
+                        
+                        # Show shortened URL for display
+                        display_url = url if len(url) < 50 else url[:47] + "..."
+                        
+                        # Use Streamlit's native link component
+                        col1.write(f"[{display_url}]({url})")
+                        
+                        # Use a unique key with index to prevent duplicates
+                        safe_url = url.replace("://", "_").replace(".", "_").replace("/", "_")[:10]
+                        if col2.button("🗑️", key=f"delete_url_{i}_{safe_url}", help="Remove this URL"):
+                            set_delete_url_confirmation(url)
+        
+
+            elif selected_option == "Spreadsheet URLs":
+                with st.sidebar:
+                    spreadsheet_url_tab()
+
+            elif selected_option == "Collaborator Uploads":
+                with st.sidebar:
+                    collaborator_uploads_review_tab()
+
+            elif selected_option == "Embeddings":
+                with st.sidebar:
+                    st.write("Export Embeddings for Manifold Comparison")
+                    
+                    # Display information about the current index
+                    # Check if there are documents or URLs instead of checking the index directly
+                    if len(st.session_state.uploaded_files) > 0 or len(st.session_state.urls) > 0:
+                        # If we're currently indexing, show that status
+                        if st.session_state.indexing_status == "in_progress":
+                            st.info("Indexing in progress. Please wait for indexing to complete before exporting.")
+                        else:
+                            # Get approximate size of the index if possible
+                            try:
+                                if st.session_state.index is not None and hasattr(st.session_state.index, "_docstore") and hasattr(st.session_state.index._docstore, "_nodes"):
+                                    node_count = len(st.session_state.index._docstore._nodes)
+                                    st.write(f"Current index contains approximately {node_count} nodes.")
+                                else:
+                                    st.write(f"Index is available for export.")
+                            except Exception:
+                                st.write("Index is available for export.")
+                            
+                            # Add export button
+                            if st.button("Export Embeddings", key="export_embeddings"):
+                                with st.spinner("Exporting embeddings..."):
+                                    success, result = export_embeddings(st.session_state.index)
                                     
-                                    # Use a container with custom CSS for better spacing
-                                    st.markdown("""
-                                    <style>
-                                    .download-container {
-                                        display: flex;
-                                        gap: 30px;
-                                        margin-top: 20px;
-                                        margin-bottom: 20px;
-                                    }
-                                    .download-option {
-                                        flex: 1;
-                                        padding: 15px;
-                                        border-radius: 5px;
-                                        background-color: rgba(255, 255, 255, 0.05);
-                                    }
-                                    .download-title {
-                                        font-size: 1.2rem;
-                                        font-weight: bold;
-                                        margin-bottom: 15px;
-                                    }
-                                    .format-benefits {
-                                        margin-bottom: 15px;
-                                    }
-                                    </style>
-                                    <div class="download-container">
-                                        <div class="download-option">
-                                            <div class="download-title">JSON Format</div>
-                                            <div class="format-benefits">
-                                                ✓ Human-readable<br>
-                                                ✓ Works with any programming language<br>
-                                                ✓ Easy to inspect and transform
-                                            </div>
-                                    """, unsafe_allow_html=True)
-                                    
-                                    # JSON download link
-                                    json_content, json_filename = result["json"]
-                                    json_link = get_text_download_link(
-                                        json_content, 
-                                        json_filename, 
-                                        "📥 Download JSON"
-                                    )
-                                    st.markdown(json_link, unsafe_allow_html=True)
-                                    
-                                    # Continue the HTML layout
-                                    st.markdown("""
-                                        </div>
-                                        <div class="download-option">
-                                            <div class="download-title">Pickle Format</div>
-                                            <div class="format-benefits">
-                                                ✓ Preserves numpy arrays exactly<br>
-                                                ✓ Smaller file size for large datasets<br>
-                                                ✓ Faster for Python-based analysis
-                                            </div>
-                                    """, unsafe_allow_html=True)
-                                    
-                                    # Pickle download link
-                                    pickle_content, pickle_filename = result["pickle"]
-                                    pickle_link = get_binary_download_link(
-                                        pickle_content, 
-                                        pickle_filename, 
-                                        "📥 Download Pickle"
-                                    )
-                                    st.markdown(pickle_link, unsafe_allow_html=True)
-                                    
-                                    # Close the HTML container
-                                    st.markdown("</div></div>", unsafe_allow_html=True)
-                                    
-                                    # Display additional info about the export
-                                    with st.expander("Export Contents"):
+                                    # Inside the success block of the export function:
+                                    if success:
+                                        st.success("Embeddings exported successfully! Choose a format to download:")
+                                        
+                                        # Use a container with custom CSS for better spacing
                                         st.markdown("""
-                                        The exported file contains:
+                                        <style>
+                                        .download-container {
+                                            display: flex;
+                                            gap: 30px;
+                                            margin-top: 20px;
+                                            margin-bottom: 20px;
+                                        }
+                                        .download-option {
+                                            flex: 1;
+                                            padding: 15px;
+                                            border-radius: 5px;
+                                            background-color: rgba(255, 255, 255, 0.05);
+                                        }
+                                        .download-title {
+                                            font-size: 1.2rem;
+                                            font-weight: bold;
+                                            margin-bottom: 15px;
+                                        }
+                                        .format-benefits {
+                                            margin-bottom: 15px;
+                                        }
+                                        </style>
+                                        <div class="download-container">
+                                            <div class="download-option">
+                                                <div class="download-title">JSON Format</div>
+                                                <div class="format-benefits">
+                                                    ✓ Human-readable<br>
+                                                    ✓ Works with any programming language<br>
+                                                    ✓ Easy to inspect and transform
+                                                </div>
+                                        """, unsafe_allow_html=True)
                                         
-                                        - **Metadata**: Timestamp, document counts, and context information
-                                        - **Node Data**: For each chunk of text in your knowledge base
-                                        - Unique node ID
-                                        - Text content
-                                        - Source metadata (document name, page, etc.)
-                                        - Full embedding vector
+                                        # JSON download link
+                                        json_content, json_filename = result["json"]
+                                        json_link = get_text_download_link(
+                                            json_content, 
+                                            json_filename, 
+                                            "📥 Download JSON"
+                                        )
+                                        st.markdown(json_link, unsafe_allow_html=True)
                                         
-                                        This structured format is ideal for:
-                                        - Comparing embeddings between different knowledge bases
-                                        - Visualizing embedding spaces using t-SNE or UMAP
-                                        - Analyzing topic clustering across different domains
-                                        - Tracking knowledge base evolution over time
-                                        """)
-                else:
-                    st.warning("No index available. Please add documents and index them first.")   
-                   
-            
+                                        # Continue the HTML layout
+                                        st.markdown("""
+                                            </div>
+                                            <div class="download-option">
+                                                <div class="download-title">Pickle Format</div>
+                                                <div class="format-benefits">
+                                                    ✓ Preserves numpy arrays exactly<br>
+                                                    ✓ Smaller file size for large datasets<br>
+                                                    ✓ Faster for Python-based analysis
+                                                </div>
+                                        """, unsafe_allow_html=True)
+                                        
+                                        # Pickle download link
+                                        pickle_content, pickle_filename = result["pickle"]
+                                        pickle_link = get_binary_download_link(
+                                            pickle_content, 
+                                            pickle_filename, 
+                                            "📥 Download Pickle"
+                                        )
+                                        st.markdown(pickle_link, unsafe_allow_html=True)
+                                        
+                                        # Close the HTML container
+                                        st.markdown("</div></div>", unsafe_allow_html=True)
+                                        
+                                        # Display additional info about the export
+                                        with st.expander("Export Contents"):
+                                            st.markdown("""
+                                            The exported file contains:
+                                            
+                                            - **Metadata**: Timestamp, document counts, and context information
+                                            - **Node Data**: For each chunk of text in your knowledge base
+                                            - Unique node ID
+                                            - Text content
+                                            - Source metadata (document name, page, etc.)
+                                            - Full embedding vector
+                                            
+                                            This structured format is ideal for:
+                                            - Comparing embeddings between different knowledge bases
+                                            - Visualizing embedding spaces using t-SNE or UMAP
+                                            - Analyzing topic clustering across different domains
+                                            - Tracking knowledge base evolution over time
+                                            """)
+                                    else:
+                                        st.error(result)
+                    else:
+                        st.warning("No index available. Please add documents and index them first.")
+
             # Force reindex button (outside tabs)
             if st.sidebar.button("⟳ Reindex All", key="force_reindex", help="Force reindex all documents and URLs"):
                 st.session_state.index_hash = ""  # Force reindex
