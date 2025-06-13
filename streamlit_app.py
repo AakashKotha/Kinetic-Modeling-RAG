@@ -40,6 +40,13 @@ import openai
 import uuid
 from datetime import datetime, timedelta
 
+try:
+    # python2
+    from urlparse import urlparse
+except ModuleNotFoundError:
+    # python3
+    from urllib.parse import urlparse
+
 # Add these constants to your existing constants
 GOOGLE_DRIVE_FOLDER_ID = "1w-6V_XZvNK6gOeFT61KZk1GLHg65brKR"  # Your Google Drive folder ID
 GOOGLE_SPREADSHEET_ID = "1tHUpcmqGza9ChAfpj1twnkMSitMhdRohQta2BNGDN74"  # Your Google Spreadsheet ID
@@ -735,11 +742,24 @@ def update_save_urls(urls):
     except Exception as e:
         st.error(f"Error saving URLs to MongoDB: {str(e)}")
 
+
+# URL validation function 
+def uri_validator(url):
+    """
+    Validate URL using urllib.parse - (more reliable than validators library)
+    """
+    try:
+        result = urlparse(url)
+        return all([result.scheme, result.netloc])
+    except AttributeError:
+        return False
+
 # Function to add URL to the knowledge base
 def add_url():
     url = st.session_state.url_input.strip()
     
-    if not validators.url(url):
+    # Use urllib.parse validation instead of validators.url()
+    if not uri_validator(url):
         st.session_state.url_delete_error_message = "Please enter a valid URL."
         return False
     
@@ -756,7 +776,7 @@ def add_url():
     st.session_state.index_hash = ""
     st.session_state.should_rerun = True
     return True
-
+    
 # Function to update index with a single document
 def update_index_with_document(index, document):
     """Update existing index with a single new document."""
@@ -3102,32 +3122,49 @@ def main():
                 # Add new URL
                 st.write("Add a new URL")
                 
-                # Check if we need to clear the URL input
-                if st.session_state.should_clear_url:
-                    url_input_value = ""
-                    st.session_state.should_clear_url = False
-                else:
-                    url_input_value = st.session_state.url_input if "url_input" in st.session_state else ""
+                # Initialize url_input in session state if it doesn't exist
+                if "url_input" not in st.session_state:
+                    st.session_state.url_input = ""
                 
-                st.text_input("URL Input", value=url_input_value, key="url_input", placeholder="https://example.com", 
-                             label_visibility="collapsed")
-                if st.button("Add URL", key="add_url_button"):
-                    add_url()
-                             
-                # Display URL success/error messages if they exist
-                if st.session_state.url_delete_success_message:
-                    st.success(st.session_state.url_delete_success_message)
-                    st.session_state.url_delete_success_message = None
+                # Handle URL input clearing more reliably
+                if st.session_state.get("should_clear_url", False):
+                    st.session_state.url_input = ""
+                    st.session_state.should_clear_url = False
+                
+                # Create the URL input with a form to ensure proper handling
+                with st.form(key="url_form", clear_on_submit=True):
+                    url_input = st.text_input(
+                        "Enter URL", 
+                        placeholder="https://example.com",
+                        key="url_form_input"
+                    )
                     
-                if st.session_state.url_delete_error_message:
-                    st.error(st.session_state.url_delete_error_message)
-                    st.session_state.url_delete_error_message = None
+                    # Submit button inside the form
+                    submitted = st.form_submit_button("Add URL")
+                    
+                    if submitted and url_input:
+                        # Use the form input directly instead of session state
+                        if not uri_validator(url_input.strip()):
+                            st.error("Please enter a valid URL.")
+                        elif url_input.strip() in st.session_state.urls:
+                            st.error(f"URL already exists: {url_input.strip()}")
+                        else:
+                            # Add the URL
+                            st.session_state.urls.append(url_input.strip())
+                            update_save_urls(st.session_state.urls)
+                            st.success(f"Added URL: {url_input.strip()}")
+                            
+                            # Force reindex
+                            st.session_state.index_hash = ""
+                            
+                            # Rerun to refresh the interface
+                            st.rerun()
                 
                 # Display available URLs
                 st.write("Available URLs:")
                 
                 # Delete confirmation dialog for URLs
-                if st.session_state.confirm_delete_url:
+                if st.session_state.get("confirm_delete_url"):
                     st.warning(f"Are you sure you want to remove this URL?")
                     st.write(st.session_state.confirm_delete_url)
                     col1, col2 = st.columns(2)
@@ -3141,15 +3178,14 @@ def main():
                     col1, col2 = st.columns([3, 1])
                     
                     # Show shortened URL for display
-                    display_url = url if len(url) < 30 else url[:27] + "..."
+                    display_url = url if len(url) < 50 else url[:47] + "..."
                     
-                    # Use Streamlit's native link component instead of HTML
+                    # Use Streamlit's native link component
                     col1.write(f"[{display_url}]({url})")
                     
                     # Use a unique key with index to prevent duplicates
-                    # Use safe characters only
-                    safe_url = url.replace("://", "_").replace(".", "_").replace("/", "_")
-                    if col2.button("🗑️", key=f"delete_url_{i}_{safe_url[:10]}", help="Remove this URL"):
+                    safe_url = url.replace("://", "_").replace(".", "_").replace("/", "_")[:10]
+                    if col2.button("🗑️", key=f"delete_url_{i}_{safe_url}", help="Remove this URL"):
                         set_delete_url_confirmation(url)
 
             # Spreadsheet URLs
