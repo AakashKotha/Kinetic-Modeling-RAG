@@ -1,6 +1,6 @@
 """
-Pubmed to Embeddings Module
-Complete implementation for PubMed scraping with Streamlit interface
+Enhanced PubMed to Embeddings Module
+Complete implementation with PubMedBERT embeddings and downloadable files
 """
 
 import streamlit as st
@@ -10,6 +10,19 @@ import time
 import re
 import threading
 from datetime import datetime
+import pandas as pd
+import numpy as np
+import pickle
+import io
+import os
+from sentence_transformers import SentenceTransformer
+import torch
+
+# Global variable to store results for download
+if 'scraping_results' not in st.session_state:
+    st.session_state.scraping_results = None
+if 'embedding_results' not in st.session_state:
+    st.session_state.embedding_results = None
 
 def build_pubmed_url(keyword, time_filter="all", start_year=None, end_year=None, page=1):
     """Build PubMed URL with proper filters"""
@@ -193,19 +206,140 @@ def extract_article_info(article_url):
         print(f"Error extracting article info from {article_url}: {e}")
         return None
 
-def scrape_pubmed_articles(keyword, time_filter, start_year=None, end_year=None):
-    """Main scraping function that processes all pages (up to PubMed's 1000-page limit)"""
-    print(f"\n{'='*80}")
-    print(f"STARTING PUBMED SCRAPE")
-    print(f"Keyword: {keyword}")
-    print(f"Time Filter: {time_filter}")
-    if time_filter == "custom":
-        print(f"Year Range: {start_year}-{end_year}")
-    print(f"{'='*80}\n")
+def create_filename_from_search(keyword, time_filter, start_year=None, end_year=None):
+    """Create a standardized filename from search parameters"""
+    # Clean keyword for filename
+    clean_keyword = re.sub(r'[^\w\s-]', '', keyword.lower())
+    clean_keyword = re.sub(r'\s+', '_', clean_keyword)
+    
+    # Create time filter part
+    if time_filter == "1yr":
+        time_part = "last_1_year"
+    elif time_filter == "5yr":
+        time_part = "last_5_years"
+    elif time_filter == "10yr":
+        time_part = "last_10_years"
+    elif time_filter == "custom" and start_year and end_year:
+        time_part = f"from_{start_year}_to_{end_year}"
+    else:
+        time_part = "all_time"
+    
+    # Add current date
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    
+    return f"{clean_keyword}_{time_part}_as_of_{current_date}"
+
+def generate_embeddings_batch(articles_data, batch_size=32, progress_container=None):
+    """Generate PubMedBERT embeddings for articles with detailed progress tracking"""
+    
+    # Initialize PubMedBERT model
+    progress_container.info("🔄 Loading PubMedBERT model...")
+    try:
+        # Use the specific PubMedBERT model
+        model = SentenceTransformer('microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract')
+        progress_container.success("✅ PubMedBERT model loaded successfully!")
+    except Exception as e:
+        progress_container.error(f"❌ Error loading model: {e}")
+        return None
+    
+    total_articles = len(articles_data)
+    embeddings_list = []
+    
+    # Process in batches
+    for batch_start in range(0, total_articles, batch_size):
+        batch_end = min(batch_start + batch_size, total_articles)
+        batch_num = (batch_start // batch_size) + 1
+        total_batches = (total_articles + batch_size - 1) // batch_size
+        
+        # Prepare batch data
+        batch_articles = articles_data[batch_start:batch_end]
+        batch_texts = []
+        
+        for article in batch_articles:
+            # Combine title and abstract for embedding
+            full_text = f"{article['title']}. {article['abstract']}"
+            batch_texts.append(full_text)
+        
+        # Update progress
+        progress_container.info(
+            f"🔄 Processing embeddings: {batch_end}/{total_articles} articles (Batch {batch_num}/{total_batches})\n"
+            f"Current batch: {len(batch_texts)} articles"
+        )
+        
+        try:
+            # Generate embeddings for this batch
+            batch_embeddings = model.encode(batch_texts, convert_to_numpy=True)
+            embeddings_list.extend(batch_embeddings)
+            
+            # Show current article being processed
+            if batch_articles:
+                current_title = batch_articles[-1]['title'][:60] + "..." if len(batch_articles[-1]['title']) > 60 else batch_articles[-1]['title']
+                progress_container.success(f"✅ Batch {batch_num} complete. Last article: '{current_title}'")
+        
+        except Exception as e:
+            progress_container.error(f"❌ Error processing batch {batch_num}: {e}")
+            continue
+        
+        # Small delay to prevent overwhelming the system
+        time.sleep(0.1)
+    
+    return np.array(embeddings_list)
+
+def create_raw_text_content(articles_data, search_info):
+    """Create formatted raw text content for download"""
+    content_lines = []
+    
+    # Header
+    content_lines.append("="*80)
+    content_lines.append("PUBMED SEARCH RESULTS")
+    content_lines.append("="*80)
+    content_lines.append(f"Search Query: {search_info['keyword']}")
+    content_lines.append(f"Time Filter: {search_info['time_filter']}")
+    if search_info.get('start_year') and search_info.get('end_year'):
+        content_lines.append(f"Year Range: {search_info['start_year']}-{search_info['end_year']}")
+    content_lines.append(f"Total Articles: {len(articles_data)}")
+    content_lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    content_lines.append("="*80)
+    content_lines.append("")
+    
+    # Articles
+    for i, article in enumerate(articles_data, 1):
+        content_lines.append("*" * 50)
+        content_lines.append(f"ARTICLE {i}/{len(articles_data)}")
+        content_lines.append("*" * 50)
+        content_lines.append("")
+        content_lines.append(f"TITLE: {article['title']}")
+        content_lines.append("")
+        content_lines.append(f"AUTHORS: {article['authors']}")
+        content_lines.append("")
+        content_lines.append(f"JOURNAL: {article['journal']}")
+        content_lines.append("")
+        content_lines.append(f"YEAR: {article['year']}")
+        content_lines.append("")
+        content_lines.append("ABSTRACT:")
+        content_lines.append(article['abstract'])
+        content_lines.append("")
+        content_lines.append(f"URL: {article['url']}")
+        content_lines.append("")
+    
+    return "\n".join(content_lines)
+
+def scrape_and_embed_articles(keyword, time_filter, start_year=None, end_year=None, progress_container=None):
+    """Main function that scrapes articles and generates embeddings"""
+    
+    # Create search info for filename and metadata
+    search_info = {
+        'keyword': keyword,
+        'time_filter': time_filter,
+        'start_year': start_year,
+        'end_year': end_year,
+        'search_date': datetime.now().strftime('%Y-%m-%d')
+    }
+    
+    progress_container.info("🚀 Starting PubMed scraping...")
     
     # Build initial URL to get total pages
     initial_url = build_pubmed_url(keyword, time_filter, start_year, end_year, page=1)
-    print(f"Search URL: {initial_url}")
     
     # Get total pages
     total_pages_found = get_total_pages(initial_url)
@@ -213,51 +347,39 @@ def scrape_pubmed_articles(keyword, time_filter, start_year=None, end_year=None)
     # Apply PubMed's 1000-page limit
     if total_pages_found > 1000:
         total_pages = 1000
-        print(f"PubMed found {total_pages_found:,} pages, but limiting to 1000 pages (PubMed restriction)")
-        print(f"Will scrape maximum 10,000 articles from first 1000 pages")
+        progress_container.warning(f"⚠️ PubMed found {total_pages_found:,} pages, limiting to 1000 pages (PubMed restriction)")
     else:
         total_pages = total_pages_found
-        print(f"Total pages to process: {total_pages}")
     
-    print()
+    articles_data = []
     
-    total_articles_processed = 0
-    
-    # Process each page (up to 1000 max)
+    # Process each page
     for page in range(1, total_pages + 1):
         page_url = build_pubmed_url(keyword, time_filter, start_year, end_year, page)
-        print(f"\n{'-'*60}")
-        print(f"PROCESSING PAGE {page} of {total_pages}")
-        if total_pages_found > 1000:
-            print(f"(Note: PubMed has {total_pages_found:,} total pages, scraping first 1000 only)")
-        print(f"Page URL: {page_url}")
-        print(f"{'-'*60}")
+        
+        progress_container.info(f"📄 Processing page {page}/{total_pages}")
         
         # Get article URLs from this page
         article_urls = get_article_urls(page_url)
-        print(f"Found {len(article_urls)} articles on page {page}")
         
         # Process each article on this page
         for i, article_url in enumerate(article_urls):
-            total_articles_processed += 1
-            print(f"\n{'*'*40}")
-            print(f"ARTICLE {i+1}/{len(article_urls)} on PAGE {page}")
-            print(f"TOTAL ARTICLES PROCESSED: {total_articles_processed}")
-            print(f"{'*'*40}")
+            current_article = len(articles_data) + 1
+            total_expected = total_pages * 10  # Rough estimate
+            
+            progress_container.info(f"📖 Extracting article {current_article} (Page {page}, Article {i+1}/{len(article_urls)})")
             
             # Extract article information
             article_info = extract_article_info(article_url)
             
             if article_info:
-                # Print article details to terminal
-                print(f"\nTITLE: {article_info['title']}")
-                print(f"\nAUTHORS: {article_info['authors']}")
-                print(f"\nJOURNAL: {article_info['journal']}")
-                print(f"\nYEAR: {article_info['year']}")
-                print(f"\nABSTRACT:\n{article_info['abstract']}")
-                print(f"\nURL: {article_info['url']}")
+                articles_data.append(article_info)
+                
+                # Show current article
+                title_preview = article_info['title'][:50] + "..." if len(article_info['title']) > 50 else article_info['title']
+                progress_container.success(f"✅ Extracted: '{title_preview}'")
             else:
-                print(f"Failed to extract information from: {article_url}")
+                progress_container.error(f"❌ Failed to extract: {article_url}")
             
             # Rate limiting
             time.sleep(0.15)
@@ -265,31 +387,67 @@ def scrape_pubmed_articles(keyword, time_filter, start_year=None, end_year=None)
         # Delay between pages
         time.sleep(0.15)
     
-    print(f"\n{'='*80}")
-    print(f"SCRAPING COMPLETED")
-    print(f"Total articles processed: {total_articles_processed}")
-    if total_pages_found > 1000:
-        print(f"Note: {total_pages_found - 1000:,} additional pages exist but were not accessible due to PubMed limits")
-    print(f"{'='*80}\n")
+    progress_container.success(f"✅ Scraping completed! Total articles: {len(articles_data)}")
+    
+    # Generate embeddings
+    progress_container.info("🧠 Starting embedding generation...")
+    embeddings = generate_embeddings_batch(articles_data, progress_container=progress_container)
+    
+    if embeddings is None:
+        progress_container.error("❌ Failed to generate embeddings")
+        return None, None
+    
+    # Create DataFrame with embeddings
+    df_data = []
+    for i, article in enumerate(articles_data):
+        df_data.append({
+            'title': article['title'],
+            'authors': article['authors'],
+            'journal': article['journal'],
+            'year': article['year'],
+            'abstract': article['abstract'],
+            'url': article['url'],
+            'search_query': keyword,
+            'search_date': search_info['search_date'],
+            'embedding': embeddings[i]
+        })
+    
+    embeddings_df = pd.DataFrame(df_data)
+    
+    # Create raw text content
+    raw_text_content = create_raw_text_content(articles_data, search_info)
+    
+    # Create filename
+    filename_base = create_filename_from_search(keyword, time_filter, start_year, end_year)
+    
+    progress_container.success("✅ All processing completed!")
+    
+    return {
+        'embeddings_df': embeddings_df,
+        'raw_text': raw_text_content,
+        'filename_base': filename_base,
+        'search_info': search_info,
+        'total_articles': len(articles_data)
+    }
 
 def pubmed_embeddings_page():
-    """Main Streamlit interface for PubMed scraping"""
+    """Main Streamlit interface for PubMed scraping with embeddings"""
     st.title("🔬 PubMed to Embeddings")
     st.markdown("---")
     
     st.markdown("""
-    ### PubMed Article Scraper
-    Search PubMed articles with abstracts and extract detailed information.
+    ### PubMed Article Scraper with PubMedBERT Embeddings
+    Search PubMed articles and generate embeddings for research analysis.
     """)
     
-    # Keyword input (outside form to make it reactive)
+    # Keyword input
     keyword = st.text_input(
         "Search Keywords:",
         placeholder="e.g., pet image reconstruction, kinetic modeling",
         help="Enter keywords to search in PubMed"
     )
     
-    # Time filter options (outside form to make it reactive)
+    # Time filter options
     time_filter = st.radio(
         "Time Range:",
         options=["all", "1yr", "5yr", "10yr", "custom"],
@@ -303,7 +461,7 @@ def pubmed_embeddings_page():
         index=0
     )
     
-    # Custom year inputs (only show when custom is selected)
+    # Custom year inputs
     start_year = None
     end_year = None
     custom_years_valid = True
@@ -317,8 +475,7 @@ def pubmed_embeddings_page():
                 min_value=1900,
                 max_value=datetime.now().year,
                 value=2020,
-                step=1,
-                key="start_year_input"
+                step=1
             )
         with col2:
             end_year = st.number_input(
@@ -326,11 +483,9 @@ def pubmed_embeddings_page():
                 min_value=1900,
                 max_value=datetime.now().year,
                 value=datetime.now().year,
-                step=1,
-                key="end_year_input"
+                step=1
             )
         
-        # Validate custom years
         if start_year and end_year:
             if start_year > end_year:
                 st.error("Start year must be less than or equal to end year")
@@ -339,7 +494,7 @@ def pubmed_embeddings_page():
                 st.error("Years cannot be in the future")
                 custom_years_valid = False
     
-    # Submit button logic
+    # Submit button validation
     submit_disabled = False
     submit_help = ""
     
@@ -354,15 +509,7 @@ def pubmed_embeddings_page():
             submit_disabled = True
             submit_help = "Please fix the year range errors"
     
-    # Submit button
-    submitted = st.button(
-        "🔍 Start Scraping",
-        disabled=submit_disabled,
-        help=submit_help if submit_disabled else "Click to start scraping PubMed articles",
-        use_container_width=True
-    )
-    
-    # Display current search parameters and article count
+    # Display search preview
     if keyword and keyword.strip():
         st.markdown("### Current Search Parameters:")
         st.write(f"**Keywords:** {keyword}")
@@ -370,102 +517,134 @@ def pubmed_embeddings_page():
             if time_filter == "custom":
                 if start_year and end_year:
                     st.write(f"**Time Range:** {start_year} - {end_year}")
-                else:
-                    st.write(f"**Time Range:** Custom (please fill in years)")
             else:
                 time_labels = {"1yr": "Last 1 year", "5yr": "Last 5 years", "10yr": "Last 10 years"}
                 st.write(f"**Time Range:** {time_labels[time_filter]}")
         else:
             st.write(f"**Time Range:** All time")
         
-        # Show preview URL
-        preview_url = build_pubmed_url(keyword, time_filter, start_year, end_year)
-        st.write(f"**Search URL:** {preview_url}")
+        # Show preview filename
+        if time_filter != "custom" or (start_year and end_year and custom_years_valid):
+            preview_filename = create_filename_from_search(keyword.strip(), time_filter, start_year, end_year)
+            st.write(f"**Files will be saved as:** `{preview_filename}.pkl` and `{preview_filename}.txt`")
         
-        # Get and display article count
+        # Get article count
         if time_filter != "custom" or (start_year and end_year and custom_years_valid):
             with st.spinner("🔍 Checking article count..."):
                 total_articles, scrapable_articles, total_pages, scrapable_pages, is_limited = get_total_articles_count(keyword.strip(), time_filter, start_year, end_year)
                 
                 if total_articles > 0:
                     if is_limited:
-                        # Show limitation warning for searches with >1000 pages
-                        st.warning(f"""
-                        ⚠️ **PubMed Limitation Detected**
-                        
-                        **Total articles found:** {total_articles:,} articles across {total_pages:,} pages
-                        
-                        **Scrapable due to PubMed limits:** {scrapable_articles:,} articles (first {scrapable_pages:,} pages only)
-                        
-                        PubMed only allows navigation up to page 1000, so {total_articles - scrapable_articles:,} articles are not accessible via scraping.
-                        """)
-                        
-                        st.info(f"📊 **Will scrape {scrapable_articles:,} articles** across **{scrapable_pages:,} pages** (maximum allowed)")
-                        
-                        # Add estimated time
-                        estimated_time_minutes = (scrapable_articles * 0.15) / 60
-                        st.write(f"⏱️ **Estimated scraping time:** ~{estimated_time_minutes:.1f} minutes")
+                        st.warning(f"⚠️ **PubMed Limitation**: {total_articles:,} articles found, but only {scrapable_articles:,} articles scrapable (first {scrapable_pages:,} pages)")
                     else:
-                        # Normal case - no limitation
                         st.success(f"📊 **Found {total_articles:,} articles** across **{total_pages:,} pages**")
-                        
-                        # Show breakdown if multiple pages
-                        if total_pages > 1:
-                            articles_on_last_page = total_articles - (total_pages - 1) * 10
-                            if articles_on_last_page > 0:
-                                st.info(f"📄 Pages 1-{total_pages-1}: {(total_pages-1) * 10:,} articles (10 per page) | Page {total_pages}: {articles_on_last_page} articles")
-                            else:
-                                st.info(f"📄 All {total_pages} pages have 10 articles each")
-                        
-                        # Add estimated time
-                        estimated_time_minutes = (total_articles * 0.15) / 60
-                        if estimated_time_minutes < 1:
-                            st.write(f"⏱️ **Estimated scraping time:** ~{estimated_time_minutes*60:.0f} seconds")
-                        else:
-                            st.write(f"⏱️ **Estimated scraping time:** ~{estimated_time_minutes:.1f} minutes")
+                    
+                    # Estimated time
+                    estimated_time_minutes = (scrapable_articles * 0.2) / 60  # Including embedding time
+                    if estimated_time_minutes < 1:
+                        st.info(f"⏱️ **Estimated processing time:** ~{estimated_time_minutes*60:.0f} seconds")
+                    else:
+                        st.info(f"⏱️ **Estimated processing time:** ~{estimated_time_minutes:.1f} minutes")
                 else:
-                    st.warning("❌ No articles found for this search. Try different keywords or time range.")
-        else:
-            st.info("🔍 Complete the search parameters to see article count")
+                    st.warning("❌ No articles found for this search.")
     
-    # Handle form submission
+    # Submit button
+    submitted = st.button(
+        "🚀 Start Scraping & Generate Embeddings",
+        disabled=submit_disabled,
+        help=submit_help if submit_disabled else "Click to start scraping and embedding generation",
+        use_container_width=True
+    )
+    
+    # Progress container
+    progress_container = st.empty()
+    
+    # Handle submission
     if submitted and keyword.strip():
-        st.success("🚀 Scraping started! Check the Python terminal for detailed output.")
-        st.info("⚠️ This process may take a while depending on the number of articles. The detailed article information will be printed to the Python terminal.")
         
-        # Add a progress indicator
-        with st.spinner("Initializing scraper..."):
-            # Start scraping in a separate thread to avoid blocking Streamlit
-            def run_scraper():
-                scrape_pubmed_articles(keyword.strip(), time_filter, start_year, end_year)
+        # Clear previous results
+        st.session_state.scraping_results = None
+        
+        # Run scraping and embedding
+        with st.spinner("Processing..."):
+            results = scrape_and_embed_articles(
+                keyword.strip(), 
+                time_filter, 
+                start_year, 
+                end_year,
+                progress_container
+            )
             
-            # Run the scraper
-            scraper_thread = threading.Thread(target=run_scraper)
-            scraper_thread.daemon = True
-            scraper_thread.start()
+            if results:
+                st.session_state.scraping_results = results
+                st.success("🎉 **Processing completed successfully!**")
+                
+                # Show summary
+                st.markdown("### Processing Summary:")
+                st.write(f"**Articles processed:** {results['total_articles']}")
+                st.write(f"**Embeddings generated:** {len(results['embeddings_df'])} (768-dimensional)")
+                st.write(f"**Model used:** PubMedBERT")
+            else:
+                st.error("❌ Processing failed. Please try again.")
+    
+    # Download section
+    if st.session_state.scraping_results:
+        st.markdown("---")
+        st.markdown("### 📥 Download Files")
+        
+        results = st.session_state.scraping_results
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Download embeddings file
+            embeddings_buffer = io.BytesIO()
+            pickle.dump(results['embeddings_df'], embeddings_buffer)
+            embeddings_buffer.seek(0)
             
-            st.success("✅ Scraper is now running! Monitor the Python terminal for progress and results.")
+            st.download_button(
+                label="📊 Download Embeddings (.pkl)",
+                data=embeddings_buffer.getvalue(),
+                file_name=f"{results['filename_base']}.pkl",
+                mime="application/octet-stream",
+                help="Pandas DataFrame with articles and PubMedBERT embeddings"
+            )
+        
+        with col2:
+            # Download raw text file
+            st.download_button(
+                label="📄 Download Raw Text (.txt)",
+                data=results['raw_text'],
+                file_name=f"{results['filename_base']}.txt",
+                mime="text/plain",
+                help="Formatted text file with all article content"
+            )
+        
+        # Show file info
+        st.markdown("### File Information:")
+        st.write(f"**Embeddings file:** Contains {len(results['embeddings_df'])} articles with metadata and 768-dimensional PubMedBERT embeddings")
+        st.write(f"**Raw text file:** Contains formatted article text for {results['total_articles']} articles")
+        st.write(f"**Ready for:** Jupyter notebook analysis, UMAP visualization, temporal comparison")
     
     # Instructions
     st.markdown("---")
     st.markdown("""
     ### Instructions:
-    1. **Enter search keywords** (e.g., "pet image reconstruction")
-    2. **Select time range** or choose custom years
-    3. **Click 'Start Scraping'** to begin
-    4. **Monitor the Python terminal** for detailed article information
+    1. **Enter search keywords** and select time range
+    2. **Review article count** and estimated processing time  
+    3. **Click 'Start Scraping'** to begin processing
+    4. **Download both files** when complete
+    5. **Import files in Jupyter** for analysis
     
-    ### Output Format:
-    Each article will be printed to the terminal with:
-    - **Title**
-    - **Authors** 
-    - **Abstract** (with structured sections)
-    - **URL**
+    ### What You Get:
+    - **Embeddings file (.pkl)**: DataFrame with articles + 768D PubMedBERT embeddings
+    - **Raw text file (.txt)**: Formatted article content for reference
+    - **Ready for analysis**: UMAP, t-SNE, temporal comparison, topic clustering
     
-    ### Note:
-    - Only articles with abstracts are included (filter=simsearch1.fha)
-    - Rate limiting is applied to be respectful to PubMed servers
-    - Progress is shown in the terminal
+    ### Next Steps:
+    - Repeat with different keywords/time ranges
+    - Use files in Jupyter for manifold analysis
+    - Compare topics or temporal evolution
     """)
     
     # Return to login button
