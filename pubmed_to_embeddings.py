@@ -432,6 +432,13 @@ def scrape_and_embed_articles(keyword, time_filter, start_year=None, end_year=No
 
 def pubmed_embeddings_page():
     """Main Streamlit interface for PubMed scraping with embeddings"""
+
+    # Initialize session state
+    if 'scraping_results' not in st.session_state:
+        st.session_state.scraping_results = None
+    if 'embedding_results' not in st.session_state:
+        st.session_state.embedding_results = None
+
     st.title("🔬 PubMed to Embeddings")
     st.markdown("---")
     
@@ -440,14 +447,23 @@ def pubmed_embeddings_page():
     Search PubMed articles and generate embeddings for research analysis.
     """)
     
-    # Keyword input
+    # Keyword input - clear results when keyword changes
     keyword = st.text_input(
         "Search Keywords:",
         placeholder="e.g., pet image reconstruction, kinetic modeling",
-        help="Enter keywords to search in PubMed"
+        help="Enter keywords to search in PubMed",
+        key="search_keyword"
     )
     
-    # Time filter options
+    # Clear previous results when keyword changes
+    if 'previous_keyword' not in st.session_state:
+        st.session_state.previous_keyword = ""
+    
+    if keyword != st.session_state.previous_keyword:
+        st.session_state.scraping_results = None
+        st.session_state.previous_keyword = keyword
+    
+    # Time filter options - clear results when time filter changes
     time_filter = st.radio(
         "Time Range:",
         options=["all", "1yr", "5yr", "10yr", "custom"],
@@ -458,8 +474,17 @@ def pubmed_embeddings_page():
             "10yr": "Last 10 years",
             "custom": "Custom range"
         }[x],
-        index=0
+        index=0,
+        key="time_filter_radio"
     )
+    
+    # Clear previous results when time filter changes
+    if 'previous_time_filter' not in st.session_state:
+        st.session_state.previous_time_filter = "all"
+    
+    if time_filter != st.session_state.previous_time_filter:
+        st.session_state.scraping_results = None
+        st.session_state.previous_time_filter = time_filter
     
     # Custom year inputs
     start_year = None
@@ -523,6 +548,10 @@ def pubmed_embeddings_page():
         else:
             st.write(f"**Time Range:** All time")
         
+        # Show preview URL - ALWAYS DISPLAY
+        preview_url = build_pubmed_url(keyword, time_filter, start_year, end_year)
+        st.write(f"**Search URL:** {preview_url}")
+        
         # Show preview filename
         if time_filter != "custom" or (start_year and end_year and custom_years_valid):
             preview_filename = create_filename_from_search(keyword.strip(), time_filter, start_year, end_year)
@@ -559,11 +588,12 @@ def pubmed_embeddings_page():
     # Progress container
     progress_container = st.empty()
     
-    # Handle submission
+    # Handle form submission
     if submitted and keyword.strip():
         
-        # Clear previous results
+        # Clear previous results immediately and set processing flag
         st.session_state.scraping_results = None
+        st.session_state.currently_processing = True
         
         # Run scraping and embedding
         with st.spinner("Processing..."):
@@ -575,9 +605,14 @@ def pubmed_embeddings_page():
                 progress_container
             )
             
+            # Clear processing flag
+            st.session_state.currently_processing = False
+            
             if results:
                 st.session_state.scraping_results = results
+                st.balloons()  # Add celebration
                 st.success("🎉 **Processing completed successfully!**")
+                st.info("📥 **Scroll down to download your files!**")
                 
                 # Show summary
                 st.markdown("### Processing Summary:")
