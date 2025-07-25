@@ -569,7 +569,7 @@ def pubmed_embeddings_page():
                         st.success(f"📊 **Found {total_articles:,} articles** across **{total_pages:,} pages**")
                     
                     # Estimated time
-                    estimated_time_minutes = (scrapable_articles * 0.2) / 60  # Including embedding time
+                    estimated_time_minutes = (scrapable_articles * 1.8) / 60  # Including embedding time
                     if estimated_time_minutes < 1:
                         st.info(f"⏱️ **Estimated processing time:** ~{estimated_time_minutes*60:.0f} seconds")
                     else:
