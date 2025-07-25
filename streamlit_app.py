@@ -52,6 +52,8 @@ except ModuleNotFoundError:
     # python3
     from urllib.parse import urlparse
 
+import pubmed_to_embeddings
+
 # Add these constants to your existing constants
 GOOGLE_DRIVE_FOLDER_ID = "1w-6V_XZvNK6gOeFT61KZk1GLHg65brKR"  # Your Google Drive folder ID
 GOOGLE_SPREADSHEET_ID = "1tHUpcmqGza9ChAfpj1twnkMSitMhdRohQta2BNGDN74"  # Your Google Spreadsheet ID
@@ -106,6 +108,7 @@ SESSION_KEYS = [
     "upload_action_success",        # Success message for upload actions
     "spreadsheet_url_success",      # Success message for spreadsheet URL import
     "spreadsheet_url_error",        # Error message for spreadsheet URL import
+    "pubmed_embeddings_status", 
 ]
 
 
@@ -517,14 +520,14 @@ def process_denial(upload, temp_db):
         st.error(f"Error denying upload: {str(e)}")
         return False
 
-# 7. UPDATE LOGIN PAGE TO INCLUDE COLLABORATOR OPTION
+# 7. UPDATE LOGIN PAGE TO INCLUDE PUBMED TO EMBEDDINGS OPTION
 def login_page():
-    """Updated login page with collaborator option."""
+    """Updated login page with pubmed to embeddings option."""
     st.markdown("<h1 style='text-align: center;'>Kinetic Modeling - RAG</h1>", unsafe_allow_html=True)
     st.markdown("<h2 style='text-align: center;'>Access Portal</h2>", unsafe_allow_html=True)
     
-    # Create a three-column layout
-    col1, col2, col3 = st.columns(3)
+    # Create a four-column layout
+    col1, col2, col3, col4 = st.columns(4)
     
     # Admin Login
     with col1:
@@ -553,6 +556,14 @@ def login_page():
             st.session_state.is_admin = False
             st.session_state.is_collaborator = True
             st.session_state.current_page = 'collaborator_upload'
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Pubmed to Embeddings
+    with col4:
+        st.markdown("<div style='text-align: center;'>", unsafe_allow_html=True)
+        if st.button("Pubmed to Embeddings", key="pubmed_embeddings_btn", use_container_width=True):
+            st.session_state.current_page = 'pubmed_embeddings'
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -3216,6 +3227,9 @@ def main():
         admin_login_form()
     elif st.session_state.current_page == 'collaborator_upload':
         collaborator_upload_page()
+    elif st.session_state.current_page == 'pubmed_embeddings':
+        # Call the pubmed embeddings page
+        pubmed_to_embeddings.pubmed_embeddings_page()    
     elif st.session_state.logged_in:
         # If we've just refreshed the files, make sure the list is up to date
         if st.session_state.files_refreshed:
